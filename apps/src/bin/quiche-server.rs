@@ -36,6 +36,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use std::cell::RefCell;
+use log::LevelFilter;
 
 use ring::rand::*;
 
@@ -53,6 +54,7 @@ fn main() {
 
     env_logger::builder()
         .default_format_timestamp_nanos(true)
+        .filter_level(LevelFilter::Info)
         .init();
 
     // Parse CLI parameters.
@@ -387,6 +389,7 @@ fn main() {
                 // is not much anyone can do to recover.
                 let app_proto = client.conn.application_proto();
                 let app_proto = &std::str::from_utf8(app_proto).unwrap();
+                info!("App protocol: {}", app_proto);
 
                 if alpns::HTTP_09.contains(app_proto) {
                     client.http_conn = Some(Box::new(Http09Conn::default()));
