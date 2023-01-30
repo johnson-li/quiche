@@ -162,7 +162,7 @@ fn main() {
                 },
             };
 
-            debug!("got {} bytes", len);
+            info!("got {} bytes", len);
 
             let pkt_buf = &mut buf[..len];
 
@@ -305,7 +305,7 @@ fn main() {
                 },
             };
 
-            debug!("{} processed {} bytes", client.conn.trace_id(), read);
+            info!("{} processed {} bytes", client.conn.trace_id(), read);
 
             // Create a new HTTP/3 connection as soon as the QUIC connection
             // is established.
@@ -420,7 +420,7 @@ fn main() {
                     panic!("send() failed: {:?}", e);
                 }
 
-                debug!("{} written {} bytes", client.conn.trace_id(), write);
+                info!("{} written {} bytes", client.conn.trace_id(), write);
             }
         }
 
