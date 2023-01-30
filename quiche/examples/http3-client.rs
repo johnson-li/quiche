@@ -193,7 +193,7 @@ fn main() {
                 },
             };
 
-            debug!("got {} bytes", len);
+            info!("got {} bytes", len);
 
             let recv_info = quiche::RecvInfo { from };
 
@@ -338,7 +338,7 @@ fn main() {
                 panic!("send() failed: {:?}", e);
             }
 
-            debug!("written {}", write);
+            info!("written {}", write);
         }
 
         if conn.is_closed() {
