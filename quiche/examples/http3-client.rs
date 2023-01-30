@@ -228,7 +228,7 @@ fn main() {
                 "migrate server to {}",
                 server
             );
-            conn.peer_addr = format!("{}:8899", server).parse().expect("Fail to convert IP from str");
+            conn.peer_addr = format!("{}:4433", server).parse().expect("Fail to convert IP from str");
             http3_conn = Some(
                 quiche::h3::Connection::with_transport(&mut conn, &h3_config)
                     .unwrap(),
