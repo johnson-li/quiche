@@ -100,6 +100,9 @@ fn main() {
     config.set_max_connection_window(conn_args.max_window);
     config.set_max_stream_window(conn_args.max_stream_window);
 
+    // Set preferred address to mobix.xuebing.me 195.148.127.230
+    config.set_preferred_address(3281289190);
+
     let mut keylog = None;
 
     if let Some(keylog_path) = std::env::var_os("SSLKEYLOGFILE") {

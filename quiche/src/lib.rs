@@ -971,6 +971,13 @@ impl Config {
     pub fn set_max_stream_window(&mut self, v: u64) {
         self.max_stream_window = v;
     }
+
+    /// Sets the preferred address.
+    ///
+    /// The default value is mobix.xuebing.me.
+    pub fn set_preferred_address(&mut self, v: u64) {
+        self.local_transport_params.preferred_address = v;
+    }
 }
 
 /// A QUIC connection.
@@ -1008,7 +1015,8 @@ pub struct Connection {
     /// Loss recovery and congestion control state.
     recovery: recovery::Recovery,
 
-    peer_addr: SocketAddr,
+    /// IP address of the remote peer
+    pub peer_addr: SocketAddr,
 
     /// List of supported application protocols.
     application_protos: Vec<Vec<u8>>,
@@ -4569,6 +4577,12 @@ impl Connection {
         self.closed
     }
 
+    /// Returns the preferred address
+    #[inline]
+    pub fn get_preferred_address(&self) -> u32 {
+        self.peer_transport_params.preferred_address as u32
+    }
+
     /// Returns true if the connection was closed due to the idle timeout.
     #[inline]
     pub fn is_timed_out(&self) -> bool {
@@ -5587,6 +5601,7 @@ struct TransportParams {
     pub initial_source_connection_id: Option<ConnectionId<'static>>,
     pub retry_source_connection_id: Option<ConnectionId<'static>>,
     pub max_datagram_frame_size: Option<u64>,
+    pub preferred_address: u64,
 }
 
 impl Default for TransportParams {
@@ -5609,6 +5624,7 @@ impl Default for TransportParams {
             initial_source_connection_id: None,
             retry_source_connection_id: None,
             max_datagram_frame_size: None,
+            preferred_address: 0,
         }
     }
 }
@@ -5720,8 +5736,8 @@ impl TransportParams {
                     if is_server {
                         return Err(Error::InvalidTransportParam);
                     }
-
                     // TODO: decode preferred_address
+                    tp.preferred_address = val.get_varint()?;
                 },
 
                 0x000e => {
@@ -5881,6 +5897,14 @@ impl TransportParams {
         }
 
         // TODO: encode preferred_address
+        if tp.preferred_address != 0 {
+            TransportParams::encode_param(
+                &mut b,
+                0x000d,
+                octets::varint_len(tp.preferred_address),
+            )?;
+            b.put_varint(tp.preferred_address)?;
+        }
 
         if tp.active_conn_id_limit != 2 {
             TransportParams::encode_param(

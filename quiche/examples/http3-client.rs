@@ -27,9 +27,10 @@
 #[macro_use]
 extern crate log;
 
-use std::net::ToSocketAddrs;
+use std::net::Ipv4Addr;
 
 use ring::rand::*;
+use std::net::ToSocketAddrs;
 use std::time::Instant;
 use env_logger::Builder;
 use log::LevelFilter;
@@ -220,6 +221,16 @@ fn main() {
 
         // Create a new HTTP/3 connection once the QUIC connection is established.
         if conn.is_established() && http3_conn.is_none() {
+            info!(
+                "handshake completed in {:?}",
+                req_start.elapsed()
+            );
+            let server = Ipv4Addr::from(conn.get_preferred_address());
+            info!(
+                "migrate server to {}",
+                server
+            );
+            conn.peer_addr = format!("{}:8899", server).parse().expect("Fail to convert IP from str");
             http3_conn = Some(
                 quiche::h3::Connection::with_transport(&mut conn, &h3_config)
                     .unwrap(),
@@ -270,7 +281,7 @@ fn main() {
                             req_start.elapsed()
                         );
 
-                        info!("{}", start.elapsed().as_millis());
+                        info!("query completed in {}", start.elapsed().as_millis());
                         conn.close(true, 0x00, b"kthxbye").unwrap();
                     },
 

@@ -79,7 +79,7 @@ fn main() {
     let mut events = mio::Events::with_capacity(1024);
 
     // Create the UDP listening socket, and register it with the event loop.
-    let socket = net::UdpSocket::bind("0.0.0.0:8889").unwrap();
+    let socket = net::UdpSocket::bind("0.0.0.0:8899").unwrap();
 
     let socket = mio::net::UdpSocket::from_socket(socket).unwrap();
     poll.register(
@@ -94,10 +94,10 @@ fn main() {
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
 
     config
-        .load_cert_chain_from_pem_file("quiche/examples/cert.crt")
+        .load_cert_chain_from_pem_file("cert.crt")
         .unwrap();
     config
-        .load_priv_key_from_pem_file("quiche/examples/cert.key")
+        .load_priv_key_from_pem_file("cert.key")
         .unwrap();
 
     config
@@ -115,6 +115,7 @@ fn main() {
     config.set_initial_max_streams_uni(100);
     config.set_disable_active_migration(true);
     config.enable_early_data();
+    config.set_preferred_address(3281289190);
 
     let h3_config = quiche::h3::Config::new().unwrap();
 
@@ -351,7 +352,7 @@ fn main() {
                                 client,
                                 stream_id,
                                 &list,
-                                "html",
+                                "/tmp/html",
                             );
                         },
 
@@ -591,7 +592,6 @@ fn build_response(
                 }
             }
 
-            warn!("File path: {}", file_path.as_path().display());
             match std::fs::read(file_path.as_path()) {
                 Ok(data) => (200, data),
 
