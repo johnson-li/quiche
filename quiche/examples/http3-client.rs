@@ -30,10 +30,17 @@ extern crate log;
 use std::net::ToSocketAddrs;
 
 use ring::rand::*;
+use std::time::Instant;
+use env_logger::Builder;
+use log::LevelFilter;
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
 
 fn main() {
+    Builder::new()
+        .filter(None, LevelFilter::Info)
+        .init();
+    let start = Instant::now();
     let mut buf = [0; 65535];
     let mut out = [0; MAX_DATAGRAM_SIZE];
 
@@ -263,6 +270,7 @@ fn main() {
                             req_start.elapsed()
                         );
 
+                        info!("{}", start.elapsed().as_millis());
                         conn.close(true, 0x00, b"kthxbye").unwrap();
                     },
 

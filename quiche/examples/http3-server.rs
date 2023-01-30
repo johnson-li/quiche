@@ -34,6 +34,8 @@ use std::collections::HashMap;
 use ring::rand::*;
 
 use quiche::h3::NameValue;
+use env_logger::Builder;
+use log::LevelFilter;
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
 
@@ -56,6 +58,9 @@ struct Client {
 type ClientMap = HashMap<quiche::ConnectionId<'static>, Client>;
 
 fn main() {
+    Builder::new()
+        .filter(None, LevelFilter::Info)
+        .init();
     let mut buf = [0; 65535];
     let mut out = [0; MAX_DATAGRAM_SIZE];
 
@@ -74,7 +79,7 @@ fn main() {
     let mut events = mio::Events::with_capacity(1024);
 
     // Create the UDP listening socket, and register it with the event loop.
-    let socket = net::UdpSocket::bind("127.0.0.1:4433").unwrap();
+    let socket = net::UdpSocket::bind("0.0.0.0:8889").unwrap();
 
     let socket = mio::net::UdpSocket::from_socket(socket).unwrap();
     poll.register(
@@ -89,10 +94,10 @@ fn main() {
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
 
     config
-        .load_cert_chain_from_pem_file("examples/cert.crt")
+        .load_cert_chain_from_pem_file("quiche/examples/cert.crt")
         .unwrap();
     config
-        .load_priv_key_from_pem_file("examples/cert.key")
+        .load_priv_key_from_pem_file("quiche/examples/cert.key")
         .unwrap();
 
     config
@@ -346,7 +351,7 @@ fn main() {
                                 client,
                                 stream_id,
                                 &list,
-                                "examples/root",
+                                "html",
                             );
                         },
 
@@ -586,6 +591,7 @@ fn build_response(
                 }
             }
 
+            warn!("File path: {}", file_path.as_path().display());
             match std::fs::read(file_path.as_path()) {
                 Ok(data) => (200, data),
 

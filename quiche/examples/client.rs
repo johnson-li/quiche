@@ -26,6 +26,9 @@
 
 #[macro_use]
 extern crate log;
+use std::time::Instant;
+use env_logger::Builder;
+use log::LevelFilter;
 
 use std::net::ToSocketAddrs;
 
@@ -36,6 +39,10 @@ const MAX_DATAGRAM_SIZE: usize = 1350;
 const HTTP_REQ_STREAM_ID: u64 = 4;
 
 fn main() {
+    Builder::new()
+        .filter(None, LevelFilter::Info)
+        .init();
+    let start = Instant::now();
     let mut buf = [0; 65535];
     let mut out = [0; MAX_DATAGRAM_SIZE];
 
@@ -192,6 +199,7 @@ fn main() {
 
         // Send an HTTP request as soon as the connection is established.
         if conn.is_established() && !req_sent {
+            info!("Time elapsed for handshake: {} ms", start.elapsed().as_millis());
             info!("sending HTTP request for {}", url.path());
 
             let req = format!("GET {}\r\n", url.path());
@@ -226,6 +234,7 @@ fn main() {
                         "response received in {:?}, closing...",
                         req_start.elapsed()
                     );
+                    info!("Time elapsed for query: {} ms", start.elapsed().as_millis());
 
                     conn.close(true, 0x00, b"kthxbye").unwrap();
                 }
