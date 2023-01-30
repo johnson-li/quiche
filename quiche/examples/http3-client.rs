@@ -281,7 +281,6 @@ fn main() {
                             req_start.elapsed()
                         );
 
-                        info!("query completed in {}", start.elapsed().as_millis());
                         conn.close(true, 0x00, b"kthxbye").unwrap();
                     },
 
