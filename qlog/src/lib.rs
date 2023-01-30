@@ -30,6 +30,8 @@
 //! events. It supports serialization and deserialization but defers logging IO
 //! choices to applications.
 //!
+//! Serialization operates in either a [buffered mode] or a [streaming mode].
+//!
 //! The crate uses Serde for conversion between Rust and JSON.
 //!
 //! [main logging schema]: https://datatracker.ietf.org/doc/html/draft-ietf-quic-qlog-main-schema
@@ -37,6 +39,8 @@
 //! https://datatracker.ietf.org/doc/html/draft-ietf-quic-qlog-quic-events.html
 //! [HTTP/3 and QPACK event definitions]:
 //! https://datatracker.ietf.org/doc/html/draft-ietf-quic-qlog-h3-events.html
+//! [buffered mode]: #buffered-traces-with-standard-json
+//! [streaming mode]: #streaming-traces-with-json-seq
 //!
 //! Overview
 //! ---------------
@@ -50,22 +54,16 @@
 //! or more Events. Applications can decide whether to combine Traces from
 //! different connections into the same Log.
 //!
-//! ## Traces
+//! ## Buffered Traces with standard JSON
 //!
-//! A [`Trace`] contains metadata such as the [`VantagePoint`] of capture and
-//! the [`Configuration`], and protocol event data in the [`Event`] array.
+//! A [`Trace`] is a single JSON object. It contains metadata such as the
+//! [`VantagePoint`] of capture and the [`Configuration`], and protocol event
+//! data in the [`Event`] array.
 //!
-//! ## Writing out logs
-//! As events occur during the connection, the application appends them to the
-//! trace. The qlog crate supports two modes of writing logs: the buffered mode
-//! stores everything in memory and requires the application to serialize and
-//! write the output, the streaming mode progressively writes serialized JSON
-//! output to a writer designated by the application.
+//! JSON Traces allow applications to appends events to them before eventually
+//! being serialized as a complete JSON object.
 //!
 //! ### Creating a Trace
-//!
-//! A typical application needs a single qlog [`Trace`] that it appends QUIC
-//! and/or HTTP/3 events to:
 //!
 //! ```
 //! let mut trace = qlog::Trace::new(
@@ -84,7 +82,7 @@
 //! );
 //! ```
 //!
-//! ## Adding events
+//! ### Adding events to a Trace
 //!
 //! Qlog [`Event`] objects are added to [`qlog::Trace.events`].
 //!
@@ -113,12 +111,12 @@
 //!
 //! let pkt_hdr = qlog::events::quic::PacketHeader::new(
 //!     qlog::events::quic::PacketType::Initial,
-//!     0,                         // packet_number
-//!     None,                      // flags
-//!     None,                      // token
-//!     None,                      // length
-//!     Some(0x00000001),          // version
-//!     Some(b"7e37e4dcc6682da8"), // scid
+//!     0,                // packet_number
+//!     None,             // flags
+//!     None,             // token
+//!     None,             // length
+//!     Some(0x00000001), // version
+//!     Some(&scid),
 //!     Some(&dcid),
 //! );
 //!
@@ -136,13 +134,15 @@
 //! let event_data =
 //!     qlog::events::EventData::PacketSent(qlog::events::quic::PacketSent {
 //!         header: pkt_hdr,
-//!         frames: Some(frames),
+//!         frames: Some(frames.into()),
 //!         is_coalesced: None,
 //!         retry_token: None,
 //!         stateless_reset_token: None,
 //!         supported_versions: None,
 //!         raw: Some(raw),
 //!         datagram_id: None,
+//!         send_at_time: None,
+//!         trigger: None,
 //!     });
 //!
 //! trace.push_event(qlog::events::Event::with_time(0.0, event_data));
@@ -187,11 +187,10 @@
 //!     "time_offset": 0.0
 //!   },
 //!   "events": [
-//!     [
-//!       0,
-//!       "transport",
-//!       "packet_sent",
-//!       {
+//!     {
+//!       "time": 0.0,
+//!       "name": "transport:packet_sent",
+//!       "data": {
 //!         "header": {
 //!           "packet_type": "initial",
 //!           "packet_number": 0,
@@ -202,29 +201,38 @@
 //!           "dcid": "36ce104eee50101c"
 //!         },
 //!         "raw": {
-//!             "length": 1251,
-//!             "payload_length": 1224
+//!           "length": 1251,
+//!           "payload_length": 1224
 //!         },
 //!         "frames": [
 //!           {
 //!             "frame_type": "crypto",
 //!             "offset": 0,
-//!             "length": 100,
+//!             "length": 0
 //!           }
 //!         ]
 //!       }
-//!     ]
+//!     }
 //!   ]
 //! }
 //! ```
 //!
-//! Streaming Mode
-//! --------------
+//! ## Streaming Traces with JSON-SEQ
 //!
-//! Create the trace:
+//! To help support streaming serialization of qlogs,
+//! draft-ietf-quic-qlog-main-schema-01 introduced support for RFC 7464 JSON
+//! Text Sequences (JSON-SEQ). The qlog crate supports this format and provides
+//! utilities that aid streaming.
+//!
+//! A [`TraceSeq`] contains metadata such as the [`VantagePoint`] of capture and
+//! the [`Configuration`]. However, protocol event data is handled as separate
+//! lines containing a record separator character, a serialized [`Event`], and a
+//! newline.
+//!
+//! ### Creating a TraceSeq
 //!
 //! ```
-//! let mut trace = qlog::Trace::new(
+//! let mut trace = qlog::TraceSeq::new(
 //!     qlog::VantagePoint {
 //!         name: Some("Example client".to_string()),
 //!         ty: qlog::VantagePointType::Client,
@@ -239,17 +247,18 @@
 //!     None,
 //! );
 //! ```
+//!
 //! Create an object with the [`Write`] trait:
 //!
 //! ```
-//! let mut file = std::fs::File::create("foo.qlog").unwrap();
+//! let mut file = std::fs::File::create("foo.sqlog").unwrap();
 //! ```
 //!
-//! Create a [`QlogStreamer`] and start serialization to foo.qlog
+//! Create a [`QlogStreamer`] and start serialization to foo.sqlog
 //! using [`start_log()`]:
 //!
 //! ```
-//! # let mut trace = qlog::Trace::new(
+//! # let mut trace = qlog::TraceSeq::new(
 //! #    qlog::VantagePoint {
 //! #        name: Some("Example client".to_string()),
 //! #        ty: qlog::VantagePointType::Client,
@@ -263,7 +272,7 @@
 //! #    }),
 //! #    None,
 //! # );
-//! # let mut file = std::fs::File::create("foo.qlog").unwrap();
+//! # let mut file = std::fs::File::create("foo.sqlog").unwrap();
 //! let mut streamer = qlog::streamer::QlogStreamer::new(
 //!     qlog::QLOG_VERSION.to_string(),
 //!     Some("Example qlog".to_string()),
@@ -278,13 +287,15 @@
 //! streamer.start_log().ok();
 //! ```
 //!
-//! ### Adding simple events
+//! ### Adding events
 //!
-//! Once logging has started you can stream events. Simple events
-//! can be written in one step using [`add_event()`]:
+//! Once logging has started you can stream events. Events
+//! are written in one step using one of [`add_event()`],
+//! [`add_event_with_instant()`], [`add_event_now()`],
+//! [`add_event_data_with_instant()`], or [`add_event_data_now()`] :
 //!
 //! ```
-//! # let mut trace = qlog::Trace::new(
+//! # let mut trace = qlog::TraceSeq::new(
 //! #    qlog::VantagePoint {
 //! #        name: Some("Example client".to_string()),
 //! #        ty: qlog::VantagePointType::Client,
@@ -309,78 +320,33 @@
 //! #     qlog::events::EventImportance::Base,
 //! #     Box::new(file),
 //! # );
-//! let event_data = qlog::events::EventData::MetricsUpdated(
-//!     qlog::events::quic::MetricsUpdated {
-//!         min_rtt: Some(1.0),
-//!         smoothed_rtt: Some(1.0),
-//!         latest_rtt: Some(1.0),
-//!         rtt_variance: Some(1.0),
-//!         pto_count: Some(1),
-//!         congestion_window: Some(1234),
-//!         bytes_in_flight: Some(5678),
-//!         ssthresh: None,
-//!         packets_in_flight: None,
-//!         pacing_rate: None,
-//!     },
-//! );
 //!
-//! let event = qlog::events::Event::with_time(0.0, event_data);
-//! streamer.add_event(event).ok();
-//! ```
+//! let scid = [0x7e, 0x37, 0xe4, 0xdc, 0xc6, 0x68, 0x2d, 0xa8];
+//! let dcid = [0x36, 0xce, 0x10, 0x4e, 0xee, 0x50, 0x10, 0x1c];
 //!
-//! ### Adding events with frames
-//! Some events contain optional arrays of QUIC frames. If the
-//! event has `Some(Vec<QuicFrame>)`, even if it is empty, the
-//! streamer enters a frame serializing mode that must be
-//! finalized before other events can be logged.
-//!
-//! In this example, a `PacketSent` event is created with an
-//! empty frame array and frames are written out later:
-//!
-//! ```
-//! # let mut trace = qlog::Trace::new(
-//! #    qlog::VantagePoint {
-//! #        name: Some("Example client".to_string()),
-//! #        ty: qlog::VantagePointType::Client,
-//! #        flow: None,
-//! #    },
-//! #    Some("Example qlog trace".to_string()),
-//! #    Some("Example qlog trace description".to_string()),
-//! #    Some(qlog::Configuration {
-//! #        time_offset: Some(0.0),
-//! #        original_uris: None,
-//! #    }),
-//! #    None,
-//! # );
-//! # let mut file = std::fs::File::create("foo.qlog").unwrap();
-//! # let mut streamer = qlog::streamer::QlogStreamer::new(
-//! #     qlog::QLOG_VERSION.to_string(),
-//! #     Some("Example qlog".to_string()),
-//! #     Some("Example qlog description".to_string()),
-//! #     None,
-//! #     std::time::Instant::now(),
-//! #     trace,
-//! #     qlog::events::EventImportance::Base,
-//! #     Box::new(file),
-//! # );
 //! let pkt_hdr = qlog::events::quic::PacketHeader::with_type(
 //!     qlog::events::quic::PacketType::OneRtt,
 //!     0,
 //!     Some(0x00000001),
-//!     Some(b"7e37e4dcc6682da8"),
-//!     Some(b"36ce104eee50101c"),
+//!     Some(&scid),
+//!     Some(&dcid),
 //! );
+//!
+//! let ping = qlog::events::quic::QuicFrame::Ping;
+//! let padding = qlog::events::quic::QuicFrame::Padding;
 //!
 //! let event_data =
 //!     qlog::events::EventData::PacketSent(qlog::events::quic::PacketSent {
 //!         header: pkt_hdr,
-//!         frames: Some(vec![]),
+//!         frames: Some(vec![ping, padding].into()),
 //!         is_coalesced: None,
 //!         retry_token: None,
 //!         stateless_reset_token: None,
 //!         supported_versions: None,
 //!         raw: None,
 //!         datagram_id: None,
+//!         send_at_time: None,
+//!         trigger: None,
 //!     });
 //!
 //! let event = qlog::events::Event::with_time(0.0, event_data);
@@ -388,52 +354,11 @@
 //! streamer.add_event(event).ok();
 //! ```
 //!
-//! In this example, the frames contained in the QUIC packet
-//! are PING and PADDING. Each frame is written using the
-//! [`add_frame()`] method. Frame writing is concluded with
-//! [`finish_frames()`].
-//!
-//! ```
-//! # let mut trace = qlog::Trace::new(
-//! #    qlog::VantagePoint {
-//! #        name: Some("Example client".to_string()),
-//! #        ty: qlog::VantagePointType::Client,
-//! #        flow: None,
-//! #    },
-//! #    Some("Example qlog trace".to_string()),
-//! #    Some("Example qlog trace description".to_string()),
-//! #    Some(qlog::Configuration {
-//! #        time_offset: Some(0.0),
-//! #        original_uris: None,
-//! #    }),
-//! #    None,
-//! # );
-//! # let mut file = std::fs::File::create("foo.qlog").unwrap();
-//! # let mut streamer = qlog::streamer::QlogStreamer::new(
-//! #     qlog::QLOG_VERSION.to_string(),
-//! #     Some("Example qlog".to_string()),
-//! #     Some("Example qlog description".to_string()),
-//! #     None,
-//! #     std::time::Instant::now(),
-//! #     trace,
-//! #     qlog::events::EventImportance::Base,
-//! #     Box::new(file),
-//! # );
-//!
-//! let ping = qlog::events::quic::QuicFrame::Ping;
-//! let padding = qlog::events::quic::QuicFrame::Padding;
-//!
-//! streamer.add_frame(ping, false).ok();
-//! streamer.add_frame(padding, false).ok();
-//!
-//! streamer.finish_frames().ok();
-//! ```
-//!
-//! Once all events have have been written, the log
+//! Once all events have been written, the log
 //! can be finalized with [`finish_log()`]:
 //!
 //! ```
-//! # let mut trace = qlog::Trace::new(
+//! # let mut trace = qlog::TraceSeq::new(
 //! #    qlog::VantagePoint {
 //! #        name: Some("Example client".to_string()),
 //! #        ty: qlog::VantagePointType::Client,
@@ -467,20 +392,20 @@
 //! are called. No additional steps are required.
 //!
 //! [`Trace`]: struct.Trace.html
+//! [`TraceSeq`]: struct.TraceSeq.html
 //! [`VantagePoint`]: struct.VantagePoint.html
 //! [`Configuration`]: struct.Configuration.html
 //! [`qlog::Trace.events`]: struct.Trace.html#structfield.events
 //! [`push_event()`]: struct.Trace.html#method.push_event
-//! [`packet_sent_min()`]: event/struct.Event.html#method.packet_sent_min
-//! [`QuicFrame::crypto()`]: enum.QuicFrame.html#variant.Crypto
 //! [`QlogStreamer`]: struct.QlogStreamer.html
 //! [`Write`]: https://doc.rust-lang.org/std/io/trait.Write.html
-//! [`start_log()`]: struct.QlogStreamer.html#method.start_log
-//! [`add_event()`]: struct.QlogStreamer.html#method.add_event
-//! [`add_event_with_instant()`]: struct.QlogStreamer.html#method.add_event
-//! [`add_frame()`]: struct.QlogStreamer.html#method.add_frame
-//! [`finish_frames()`]: struct.QlogStreamer.html#method.finish_frames
-//! [`finish_log()`]: struct.QlogStreamer.html#method.finish_log
+//! [`start_log()`]: streamer/struct.QlogStreamer.html#method.start_log
+//! [`add_event()`]: streamer/struct.QlogStreamer.html#method.add_event
+//! [`add_event_with_instant()`]: streamer/struct.QlogStreamer.html#method.add_event_with_instant
+//! [`add_event_now()`]: streamer/struct.QlogStreamer.html#method.add_event_now
+//! [`add_event_data_with_instant()`]: streamer/struct.QlogStreamer.html#method.add_event_data_with_instant
+//! [`add_event_data_now()`]: streamer/struct.QlogStreamer.html#method.add_event_data_now
+//! [`finish_log()`]: streamer/struct.QlogStreamer.html#method.finish_log
 
 use crate::events::quic::PacketHeader;
 use crate::events::Event;
@@ -498,13 +423,16 @@ pub enum Error {
     /// in an invalid state.
     InvalidState,
 
+    // Invalid Qlog format
+    InvalidFormat,
+
     /// I/O error.
     IoError(std::io::Error),
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{self:?}")
     }
 }
 
@@ -520,7 +448,10 @@ impl std::convert::From<std::io::Error> for Error {
     }
 }
 
-pub const QLOG_VERSION: &str = "draft-02";
+pub const QLOG_VERSION: &str = "0.3";
+
+pub type Bytes = String;
+pub type StatelessResetToken = Bytes;
 
 /// A specialized [`Result`] type for quiche qlog operations.
 ///
@@ -541,18 +472,16 @@ pub struct Qlog {
 
     pub traces: Vec<Trace>,
 }
+#[serde_with::skip_serializing_none]
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct QlogSeq {
+    pub qlog_version: String,
+    pub qlog_format: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub summary: Option<String>,
 
-impl Default for Qlog {
-    fn default() -> Self {
-        Qlog {
-            qlog_version: QLOG_VERSION.to_string(),
-            qlog_format: "JSON".to_string(),
-            title: Some("Default qlog title".to_string()),
-            description: Some("Default qlog description".to_string()),
-            summary: Some("Default qlog title".to_string()),
-            traces: Vec::new(),
-        }
-    }
+    pub trace: TraceSeq,
 }
 
 #[derive(Clone, Copy)]
@@ -578,9 +507,9 @@ pub struct Trace {
     pub events: Vec<Event>,
 }
 
-/// Helper functions for using a qlog trace.
+/// Helper functions for using a qlog [Trace].
 impl Trace {
-    /// Creates a new qlog trace
+    /// Creates a new qlog [Trace]
     pub fn new(
         vantage_point: VantagePoint, title: Option<String>,
         description: Option<String>, configuration: Option<Configuration>,
@@ -596,15 +525,44 @@ impl Trace {
         }
     }
 
+    /// Append an [Event] to a [Trace]
     pub fn push_event(&mut self, event: Event) {
         self.events.push(event);
     }
 }
 
-pub type Bytes = String;
-
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct TraceSeq {
+    pub vantage_point: VantagePoint,
+    pub title: Option<String>,
+    pub description: Option<String>,
+
+    pub configuration: Option<Configuration>,
+
+    pub common_fields: Option<CommonFields>,
+}
+
+/// Helper functions for using a qlog [TraceSeq].
+impl TraceSeq {
+    /// Creates a new qlog [TraceSeq]
+    pub fn new(
+        vantage_point: VantagePoint, title: Option<String>,
+        description: Option<String>, configuration: Option<Configuration>,
+        common_fields: Option<CommonFields>,
+    ) -> Self {
+        TraceSeq {
+            vantage_point,
+            title,
+            description,
+            configuration,
+            common_fields,
+        }
+    }
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct VantagePoint {
     pub name: Option<String>,
 
@@ -614,7 +572,7 @@ pub struct VantagePoint {
     pub flow: Option<VantagePointType>,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum VantagePointType {
     Client,
@@ -652,16 +610,15 @@ pub struct CommonFields {
     // TODO: additionalUserSpecifiedProperty
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum TokenType {
     Retry,
     Resumption,
-    StatelessReset,
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct Token {
     #[serde(rename(serialize = "type"))]
     pub ty: Option<TokenType>,
@@ -693,7 +650,7 @@ impl<'a> HexSlice<'a> {
 impl<'a> std::fmt::Display for HexSlice<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         for byte in self.0 {
-            write!(f, "{:02x}", byte)?;
+            write!(f, "{byte:02x}")?;
         }
         Ok(())
     }
@@ -725,6 +682,23 @@ pub mod testing {
 
     pub fn make_trace() -> Trace {
         Trace::new(
+            VantagePoint {
+                name: None,
+                ty: VantagePointType::Server,
+                flow: None,
+            },
+            Some("Quiche qlog trace".to_string()),
+            Some("Quiche qlog trace description".to_string()),
+            Some(Configuration {
+                time_offset: Some(0.0),
+                original_uris: None,
+            }),
+            None,
+        )
+    }
+
+    pub fn make_trace_seq() -> TraceSeq {
+        TraceSeq::new(
             VantagePoint {
                 name: None,
                 ty: VantagePointType::Server,
@@ -775,7 +749,7 @@ mod tests {
 
         let pkt_hdr = make_pkt_hdr(PacketType::Initial);
         let ev_data = EventData::PacketSent(PacketSent {
-            header: pkt_hdr.clone(),
+            header: pkt_hdr,
             frames: None,
             is_coalesced: None,
             retry_token: None,
@@ -787,6 +761,8 @@ mod tests {
                 data: None,
             }),
             datagram_id: None,
+            send_at_time: None,
+            trigger: None,
         });
 
         let ev = Event::with_time(0.0, ev_data);
@@ -845,8 +821,8 @@ mod tests {
         });
 
         let ev_data = EventData::PacketSent(PacketSent {
-            header: pkt_hdr.clone(),
-            frames: Some(frames),
+            header: pkt_hdr,
+            frames: Some(frames.into()),
             is_coalesced: None,
             retry_token: None,
             stateless_reset_token: None,
@@ -857,6 +833,8 @@ mod tests {
                 data: None,
             }),
             datagram_id: None,
+            send_at_time: None,
+            trigger: None,
         });
 
         let ev = Event::with_time(0.0, ev_data);
@@ -883,6 +861,28 @@ mod tests {
         assert_eq!(serialized, log_string);
 
         let deserialized: Trace = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, trace);
+    }
+
+    #[test]
+    fn trace_seq_no_events() {
+        let log_string = r#"{
+  "vantage_point": {
+    "type": "server"
+  },
+  "title": "Quiche qlog trace",
+  "description": "Quiche qlog trace description",
+  "configuration": {
+    "time_offset": 0.0
+  }
+}"#;
+
+        let trace = make_trace_seq();
+
+        let serialized = serde_json::to_string_pretty(&trace).unwrap();
+        assert_eq!(serialized, log_string);
+
+        let deserialized: TraceSeq = serde_json::from_str(&serialized).unwrap();
         assert_eq!(deserialized, trace);
     }
 
@@ -942,7 +942,7 @@ mod tests {
         }];
         let event_data = EventData::PacketSent(PacketSent {
             header: pkt_hdr,
-            frames: Some(frames),
+            frames: Some(frames.into()),
             is_coalesced: None,
             retry_token: None,
             stateless_reset_token: None,
@@ -953,6 +953,8 @@ mod tests {
                 data: None,
             }),
             datagram_id: None,
+            send_at_time: None,
+            trigger: None,
         });
 
         let ev = Event::with_time(0.0, event_data);

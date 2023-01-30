@@ -29,7 +29,6 @@ use std::cmp;
 use std::sync::Arc;
 
 use std::collections::hash_map;
-
 use std::collections::BTreeMap;
 use std::collections::BinaryHeap;
 use std::collections::HashMap;
@@ -37,6 +36,8 @@ use std::collections::HashSet;
 use std::collections::VecDeque;
 
 use std::time;
+
+use smallvec::SmallVec;
 
 use crate::Error;
 use crate::Result;
@@ -58,18 +59,51 @@ const DEFAULT_STREAM_WINDOW: u64 = 32 * 1024;
 /// The maximum size of the receiver stream flow control window.
 pub const MAX_STREAM_WINDOW: u64 = 16 * 1024 * 1024;
 
+/// A simple no-op hasher for Stream IDs.
+///
+/// The QUIC protocol and quiche library guarantees stream ID uniqueness, so
+/// we can save effort by avoiding using a more complicated algorithm.
+#[derive(Default)]
+pub struct StreamIdHasher {
+    id: u64,
+}
+
+impl std::hash::Hasher for StreamIdHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.id
+    }
+
+    #[inline]
+    fn write_u64(&mut self, id: u64) {
+        self.id = id;
+    }
+
+    #[inline]
+    fn write(&mut self, _: &[u8]) {
+        // We need a default write() for the trait but stream IDs will always
+        // be a u64 so we just delegate to write_u64.
+        unimplemented!()
+    }
+}
+
+type BuildStreamIdHasher = std::hash::BuildHasherDefault<StreamIdHasher>;
+
+pub type StreamIdHashMap<V> = HashMap<u64, V, BuildStreamIdHasher>;
+pub type StreamIdHashSet = HashSet<u64, BuildStreamIdHasher>;
+
 /// Keeps track of QUIC streams and enforces stream limits.
 #[derive(Default)]
 pub struct StreamMap {
     /// Map of streams indexed by stream ID.
-    streams: HashMap<u64, Stream>,
+    streams: StreamIdHashMap<Stream>,
 
     /// Set of streams that were completed and garbage collected.
     ///
     /// Instead of keeping the full stream state forever, we collect completed
     /// streams to save memory, but we still need to keep track of previously
     /// created streams, to prevent peers from re-creating them.
-    collected: HashSet<u64>,
+    collected: StreamIdHashSet,
 
     /// Peer's maximum bidirectional stream count limit.
     peer_max_streams_bidi: u64,
@@ -113,34 +147,34 @@ pub struct StreamMap {
     /// Set of stream IDs corresponding to streams that have outstanding data
     /// to read. This is used to generate a `StreamIter` of streams without
     /// having to iterate over the full list of streams.
-    readable: HashSet<u64>,
+    readable: StreamIdHashSet,
 
     /// Set of stream IDs corresponding to streams that have enough flow control
     /// capacity to be written to, and is not finished. This is used to generate
     /// a `StreamIter` of streams without having to iterate over the full list
     /// of streams.
-    writable: HashSet<u64>,
+    writable: StreamIdHashSet,
 
     /// Set of stream IDs corresponding to streams that are almost out of flow
     /// control credit and need to send MAX_STREAM_DATA. This is used to
     /// generate a `StreamIter` of streams without having to iterate over the
     /// full list of streams.
-    almost_full: HashSet<u64>,
+    almost_full: StreamIdHashSet,
 
     /// Set of stream IDs corresponding to streams that are blocked. The value
     /// of the map elements represents the offset of the stream at which the
     /// blocking occurred.
-    blocked: HashMap<u64, u64>,
+    blocked: StreamIdHashMap<u64>,
 
     /// Set of stream IDs corresponding to streams that are reset. The value
     /// of the map elements is a tuple of the error code and final size values
     /// to include in the RESET_STREAM frame.
-    reset: HashMap<u64, (u64, u64)>,
+    reset: StreamIdHashMap<(u64, u64)>,
 
     /// Set of stream IDs corresponding to streams that are shutdown on the
     /// receive side, and need to send a STOP_SENDING frame. The value of the
     /// map elements is the error code to include in the STOP_SENDING frame.
-    stopped: HashMap<u64, u64>,
+    stopped: StreamIdHashMap<u64>,
 
     /// The maximum size of a stream window.
     max_stream_window: u64,
@@ -221,46 +255,63 @@ impl StreamMap {
                         (local_params.initial_max_stream_data_uni, 0),
                 };
 
+                // The two least significant bits from a stream id identify the
+                // type of stream. Truncate those bits to get the sequence for
+                // that stream type.
+                let stream_sequence = id >> 2;
+
                 // Enforce stream count limits.
                 match (is_local(id, is_server), is_bidi(id)) {
                     (true, true) => {
-                        if self.local_opened_streams_bidi >=
-                            self.peer_max_streams_bidi
-                        {
+                        let n = std::cmp::max(
+                            self.local_opened_streams_bidi,
+                            stream_sequence + 1,
+                        );
+
+                        if n > self.peer_max_streams_bidi {
                             return Err(Error::StreamLimit);
                         }
 
-                        self.local_opened_streams_bidi += 1;
+                        self.local_opened_streams_bidi = n;
                     },
 
                     (true, false) => {
-                        if self.local_opened_streams_uni >=
-                            self.peer_max_streams_uni
-                        {
+                        let n = std::cmp::max(
+                            self.local_opened_streams_uni,
+                            stream_sequence + 1,
+                        );
+
+                        if n > self.peer_max_streams_uni {
                             return Err(Error::StreamLimit);
                         }
 
-                        self.local_opened_streams_uni += 1;
+                        self.local_opened_streams_uni = n;
                     },
 
                     (false, true) => {
-                        if self.peer_opened_streams_bidi >=
-                            self.local_max_streams_bidi
-                        {
+                        let n = std::cmp::max(
+                            self.peer_opened_streams_bidi,
+                            stream_sequence + 1,
+                        );
+
+                        if n > self.local_max_streams_bidi {
                             return Err(Error::StreamLimit);
                         }
 
-                        self.peer_opened_streams_bidi += 1;
+                        self.peer_opened_streams_bidi = n;
                     },
 
                     (false, false) => {
-                        if self.peer_opened_streams_uni >=
-                            self.local_max_streams_uni
-                        {
+                        let n = std::cmp::max(
+                            self.peer_opened_streams_uni,
+                            stream_sequence + 1,
+                        );
+
+                        if n > self.local_max_streams_uni {
                             return Err(Error::StreamLimit);
                         }
 
-                        self.peer_opened_streams_uni += 1;
+                        self.peer_opened_streams_uni = n;
                     },
                 };
 
@@ -311,41 +362,42 @@ impl StreamMap {
         };
     }
 
-    /// Removes and returns the first stream ID from the flushable streams
-    /// queue with the specified urgency.
+    /// Returns the first stream ID from the flushable streams
+    /// queue with the highest urgency.
     ///
-    /// Note that if the stream is still flushable after sending some of its
-    /// outstanding data, it needs to be added back to the queue.
-    pub fn pop_flushable(&mut self) -> Option<u64> {
-        // Remove the first element from the queue corresponding to the lowest
-        // urgency that has elements.
-        let (node, clear) =
-            if let Some((urgency, queues)) = self.flushable.iter_mut().next() {
-                let node = if !queues.0.is_empty() {
-                    queues.0.pop().map(|x| x.0)
-                } else {
-                    queues.1.pop_front()
-                };
-
-                let clear = if queues.0.is_empty() && queues.1.is_empty() {
-                    Some(*urgency)
+    /// Note that if the stream is no longer flushable after sending some of its
+    /// outstanding data, it needs to be removed from the queue.
+    pub fn peek_flushable(&mut self) -> Option<u64> {
+        self.flushable.iter_mut().next().and_then(|(_, queues)| {
+            queues.0.peek().map(|x| x.0).or_else(|| {
+                // When peeking incremental streams, make sure to move the current
+                // stream to the end of the queue so they are pocesses in a round
+                // robin fashion
+                if let Some(current_incremental) = queues.1.pop_front() {
+                    queues.1.push_back(current_incremental);
+                    Some(current_incremental)
                 } else {
                     None
-                };
+                }
+            })
+        })
+    }
 
-                (node, clear)
-            } else {
-                (None, None)
-            };
+    /// Remove the last peeked stream
+    pub fn remove_flushable(&mut self) {
+        let mut top_urgency = self
+            .flushable
+            .first_entry()
+            .expect("Remove previously peeked stream");
 
+        let queues = top_urgency.get_mut();
+        queues.0.pop().map(|x| x.0).or_else(|| queues.1.pop_back());
         // Remove the queue from the list of queues if it is now empty, so that
         // the next time `pop_flushable()` is called the next queue with elements
         // is used.
-        if let Some(urgency) = &clear {
-            self.flushable.remove(urgency);
+        if queues.0.is_empty() && queues.1.is_empty() {
+            top_urgency.remove();
         }
-
-        node
     }
 
     /// Adds or removes the stream ID to/from the readable streams set.
@@ -439,6 +491,11 @@ impl StreamMap {
         self.local_max_streams_bidi = self.local_max_streams_bidi_next;
     }
 
+    /// Returns the current max_streams_bidi limit.
+    pub fn max_streams_bidi(&self) -> u64 {
+        self.local_max_streams_bidi
+    }
+
     /// Returns the new max_streams_bidi limit.
     pub fn max_streams_bidi_next(&mut self) -> u64 {
         self.local_max_streams_bidi_next
@@ -515,6 +572,11 @@ impl StreamMap {
     /// Creates an iterator over streams that need to send STOP_SENDING.
     pub fn stopped(&self) -> hash_map::Iter<u64, u64> {
         self.stopped.iter()
+    }
+
+    /// Returns true if the stream has been collected.
+    pub fn is_collected(&self, stream_id: u64) -> bool {
+        self.collected.contains(&stream_id)
     }
 
     /// Returns true if there are any streams that have data to write.
@@ -656,6 +718,11 @@ impl Stream {
             (false, false) => self.recv.is_fin(),
         }
     }
+
+    /// Returns true if the stream is not storing incoming data.
+    pub fn is_draining(&self) -> bool {
+        self.recv.drain
+    }
 }
 
 /// Returns true if the stream was created locally.
@@ -671,12 +738,12 @@ pub fn is_bidi(stream_id: u64) -> bool {
 /// An iterator over QUIC streams.
 #[derive(Default)]
 pub struct StreamIter {
-    streams: Vec<u64>,
+    streams: SmallVec<[u64; 8]>,
 }
 
 impl StreamIter {
     #[inline]
-    fn from(streams: &HashSet<u64>) -> Self {
+    fn from(streams: &StreamIdHashSet) -> Self {
         StreamIter {
             streams: streams.iter().copied().collect(),
         }
@@ -708,7 +775,7 @@ impl ExactSizeIterator for StreamIter {
 pub struct RecvBuf {
     /// Chunks of data received from the peer that have not yet been read by
     /// the application, ordered by offset.
-    data: BinaryHeap<RangeBuf>,
+    data: BTreeMap<u64, RangeBuf>,
 
     /// The lowest data offset that has yet to be read by the application.
     off: u64,
@@ -803,11 +870,10 @@ impl RecvBuf {
             }
         }
 
-        let mut tmp_buf = Some(buf);
+        let mut tmp_bufs = VecDeque::with_capacity(2);
+        tmp_bufs.push_back(buf);
 
-        while let Some(mut buf) = tmp_buf {
-            tmp_buf = None;
-
+        'tmp: while let Some(mut buf) = tmp_bufs.pop_front() {
             // Discard incoming data below current stream offset. Bytes up to
             // `self.off` have already been received so we should not buffer
             // them again. This is also important to make sure `ready()` doesn't
@@ -824,21 +890,28 @@ impl RecvBuf {
             // flag set, which is the only kind of empty buffer that should
             // reach this point).
             if buf.off() < self.max_off() || buf.is_empty() {
-                for b in &self.data {
+                for (_, b) in self.data.range(buf.off()..) {
+                    let off = buf.off();
+
+                    // We are past the current buffer.
+                    if b.off() > buf.max_off() {
+                        break;
+                    }
+
                     // New buffer is fully contained in existing buffer.
-                    if buf.off() >= b.off() && buf.max_off() <= b.max_off() {
-                        return Ok(());
+                    if off >= b.off() && buf.max_off() <= b.max_off() {
+                        continue 'tmp;
                     }
 
                     // New buffer's start overlaps existing buffer.
-                    if buf.off() >= b.off() && buf.off() < b.max_off() {
-                        buf = buf.split_off((b.max_off() - buf.off()) as usize);
+                    if off >= b.off() && off < b.max_off() {
+                        buf = buf.split_off((b.max_off() - off) as usize);
                     }
 
                     // New buffer's end overlaps existing buffer.
-                    if buf.off() < b.off() && buf.max_off() > b.off() {
-                        tmp_buf =
-                            Some(buf.split_off((b.off() - buf.off()) as usize));
+                    if off < b.off() && buf.max_off() > b.off() {
+                        tmp_bufs
+                            .push_back(buf.split_off((b.off() - off) as usize));
                     }
                 }
             }
@@ -846,7 +919,7 @@ impl RecvBuf {
             self.len = cmp::max(self.len, buf.max_off());
 
             if !self.drain {
-                self.data.push(buf);
+                self.data.insert(buf.max_off(), buf);
             }
         }
 
@@ -876,11 +949,12 @@ impl RecvBuf {
         }
 
         while cap > 0 && self.ready() {
-            let mut buf = match self.data.peek_mut() {
-                Some(v) => v,
-
+            let mut entry = match self.data.first_entry() {
+                Some(entry) => entry,
                 None => break,
             };
+
+            let buf = entry.get_mut();
 
             let buf_len = cmp::min(buf.len(), cap);
 
@@ -898,7 +972,7 @@ impl RecvBuf {
                 break;
             }
 
-            std::collections::binary_heap::PeekMut::pop(buf);
+            entry.remove();
         }
 
         // Update consumed bytes for flow control.
@@ -1013,9 +1087,8 @@ impl RecvBuf {
 
     /// Returns true if the stream has data to be read.
     fn ready(&self) -> bool {
-        let buf = match self.data.peek() {
+        let (_, buf) = match self.data.first_key_value() {
             Some(v) => v,
-
             None => return false,
         };
 
@@ -1048,6 +1121,9 @@ pub struct SendBuf {
 
     /// The maximum offset we are allowed to send to the peer.
     max_data: u64,
+
+    /// The last offset the stream was blocked at, if any.
+    blocked_at: Option<u64>,
 
     /// The final stream offset written to the stream, if any.
     fin_off: Option<u64>,
@@ -1168,8 +1244,7 @@ impl SendBuf {
 
             // Copy data to the output buffer.
             let out_pos = (next_off - out_off) as usize;
-            (&mut out[out_pos..out_pos + buf_len])
-                .copy_from_slice(&buf[..buf_len]);
+            out[out_pos..out_pos + buf_len].copy_from_slice(&buf[..buf_len]);
 
             self.len -= buf_len as u64;
 
@@ -1201,6 +1276,16 @@ impl SendBuf {
     /// Updates the max_data limit to the given value.
     pub fn update_max_data(&mut self, max_data: u64) {
         self.max_data = cmp::max(self.max_data, max_data);
+    }
+
+    /// Updates the last offset the stream was blocked at, if any.
+    pub fn update_blocked_at(&mut self, blocked_at: Option<u64>) {
+        self.blocked_at = blocked_at;
+    }
+
+    /// The last offset the stream was blocked at, if any.
+    pub fn blocked_at(&self) -> Option<u64> {
+        self.blocked_at
     }
 
     /// Increments the acked data offset.
@@ -1277,13 +1362,15 @@ impl SendBuf {
             // Split the buffer into 2 if the retransmit range ends before the
             // buffer's final offset.
             let new_buf = if buf.off < max_off && max_off < buf.max_off() {
-                Some(buf.split_off((max_off - buf.off as u64) as usize))
+                Some(buf.split_off((max_off - buf.off) as usize))
             } else {
                 None
             };
 
-            // Advance the buffer's position if the retransmit range is past
-            // the buffer's starting offset.
+            let prev_pos = buf.pos;
+
+            // Reduce the buffer's position (expand the buffer) if the retransmit
+            // range is past the buffer's starting offset.
             buf.pos = if off > buf.off && off <= buf.max_off() {
                 cmp::min(buf.pos, buf.start + (off - buf.off) as usize)
             } else {
@@ -1292,7 +1379,7 @@ impl SendBuf {
 
             self.pos = cmp::min(self.pos, i);
 
-            self.len += buf.len() as u64;
+            self.len += (prev_pos - buf.pos) as u64;
 
             if let Some(b) = new_buf {
                 self.data.insert(i + 1, b);
@@ -1374,7 +1461,7 @@ impl SendBuf {
 
     /// Returns true if all data in the stream has been sent.
     ///
-    /// This happens when the stream's send final size is knwon, and the
+    /// This happens when the stream's send final size is known, and the
     /// application has already written data up to that point.
     pub fn is_fin(&self) -> bool {
         if self.fin_off == Some(self.off) {
@@ -1448,7 +1535,7 @@ impl SendBuf {
 pub struct RangeBuf {
     /// The internal buffer holding the data.
     ///
-    /// To avoid neeless allocations when a RangeBuf is split, this field is
+    /// To avoid needless allocations when a RangeBuf is split, this field is
     /// reference-counted and can be shared between multiple RangeBuf objects,
     /// and sliced using the `start` and `len` values.
     data: Arc<Vec<u8>>,
@@ -1993,6 +2080,90 @@ mod tests {
         assert_eq!(&buf[..len], b"helsomething");
         assert_eq!(recv.len, 12);
         assert_eq!(recv.off, 12);
+
+        assert_eq!(recv.emit(&mut buf), Err(Error::Done));
+    }
+
+    #[test]
+    fn overlapping_end_twice_read() {
+        let mut recv = RecvBuf::new(std::u64::MAX, DEFAULT_STREAM_WINDOW);
+        assert_eq!(recv.len, 0);
+
+        let mut buf = [0; 32];
+
+        let first = RangeBuf::from(b"he", 0, false);
+        let second = RangeBuf::from(b"ow", 4, false);
+        let third = RangeBuf::from(b"rl", 7, false);
+        let fourth = RangeBuf::from(b"helloworld", 0, true);
+
+        assert!(recv.write(third).is_ok());
+        assert_eq!(recv.len, 9);
+        assert_eq!(recv.off, 0);
+        assert_eq!(recv.data.len(), 1);
+
+        assert!(recv.write(second).is_ok());
+        assert_eq!(recv.len, 9);
+        assert_eq!(recv.off, 0);
+        assert_eq!(recv.data.len(), 2);
+
+        assert!(recv.write(first).is_ok());
+        assert_eq!(recv.len, 9);
+        assert_eq!(recv.off, 0);
+        assert_eq!(recv.data.len(), 3);
+
+        assert!(recv.write(fourth).is_ok());
+        assert_eq!(recv.len, 10);
+        assert_eq!(recv.off, 0);
+        assert_eq!(recv.data.len(), 6);
+
+        let (len, fin) = recv.emit(&mut buf).unwrap();
+        assert_eq!(len, 10);
+        assert_eq!(fin, true);
+        assert_eq!(&buf[..len], b"helloworld");
+        assert_eq!(recv.len, 10);
+        assert_eq!(recv.off, 10);
+
+        assert_eq!(recv.emit(&mut buf), Err(Error::Done));
+    }
+
+    #[test]
+    fn overlapping_end_twice_and_contained_read() {
+        let mut recv = RecvBuf::new(std::u64::MAX, DEFAULT_STREAM_WINDOW);
+        assert_eq!(recv.len, 0);
+
+        let mut buf = [0; 32];
+
+        let first = RangeBuf::from(b"hellow", 0, false);
+        let second = RangeBuf::from(b"barfoo", 10, true);
+        let third = RangeBuf::from(b"rl", 7, false);
+        let fourth = RangeBuf::from(b"elloworldbarfoo", 1, true);
+
+        assert!(recv.write(third).is_ok());
+        assert_eq!(recv.len, 9);
+        assert_eq!(recv.off, 0);
+        assert_eq!(recv.data.len(), 1);
+
+        assert!(recv.write(second).is_ok());
+        assert_eq!(recv.len, 16);
+        assert_eq!(recv.off, 0);
+        assert_eq!(recv.data.len(), 2);
+
+        assert!(recv.write(first).is_ok());
+        assert_eq!(recv.len, 16);
+        assert_eq!(recv.off, 0);
+        assert_eq!(recv.data.len(), 3);
+
+        assert!(recv.write(fourth).is_ok());
+        assert_eq!(recv.len, 16);
+        assert_eq!(recv.off, 0);
+        assert_eq!(recv.data.len(), 5);
+
+        let (len, fin) = recv.emit(&mut buf).unwrap();
+        assert_eq!(len, 16);
+        assert_eq!(fin, true);
+        assert_eq!(&buf[..len], b"helloworldbarfoo");
+        assert_eq!(recv.len, 16);
+        assert_eq!(recv.off, 16);
 
         assert_eq!(recv.emit(&mut buf), Err(Error::Done));
     }
@@ -3093,5 +3264,96 @@ mod tests {
         assert_eq!(new_new_buf.fin(), true);
 
         assert_eq!(&new_new_buf[..], b"");
+    }
+
+    /// RFC9000 2.1: A stream ID that is used out of order results in all
+    /// streams of that type with lower-numbered stream IDs also being opened.
+    #[test]
+    fn stream_limit_auto_open() {
+        let local_tp = crate::TransportParams::default();
+        let peer_tp = crate::TransportParams::default();
+
+        let mut streams = StreamMap::new(5, 5, 5);
+
+        let stream_id = 500;
+        assert!(!is_local(stream_id, true), "stream id is peer initiated");
+        assert!(is_bidi(stream_id), "stream id is bidirectional");
+        assert_eq!(
+            streams
+                .get_or_create(stream_id, &local_tp, &peer_tp, false, true)
+                .err(),
+            Some(Error::StreamLimit),
+            "stream limit should be exceeded"
+        );
+    }
+
+    /// Stream limit should be satisfied regardless of what order we open
+    /// streams
+    #[test]
+    fn stream_create_out_of_order() {
+        let local_tp = crate::TransportParams::default();
+        let peer_tp = crate::TransportParams::default();
+
+        let mut streams = StreamMap::new(5, 5, 5);
+
+        for stream_id in [8, 12, 4] {
+            assert!(is_local(stream_id, false), "stream id is client initiated");
+            assert!(is_bidi(stream_id), "stream id is bidirectional");
+            assert!(streams
+                .get_or_create(stream_id, &local_tp, &peer_tp, false, true)
+                .is_ok());
+        }
+    }
+
+    /// Check stream limit boundary cases
+    #[test]
+    fn stream_limit_edge() {
+        let local_tp = crate::TransportParams::default();
+        let peer_tp = crate::TransportParams::default();
+
+        let mut streams = StreamMap::new(3, 3, 3);
+
+        // Highest permitted
+        let stream_id = 8;
+        assert!(streams
+            .get_or_create(stream_id, &local_tp, &peer_tp, false, true)
+            .is_ok());
+
+        // One more than highest permitted
+        let stream_id = 12;
+        assert_eq!(
+            streams
+                .get_or_create(stream_id, &local_tp, &peer_tp, false, true)
+                .err(),
+            Some(Error::StreamLimit)
+        );
+    }
+
+    /// Check SendBuf::len calculation on a retransmit case
+    #[test]
+    fn send_buf_len_on_retransmit() {
+        let mut buf = [0; 15];
+
+        let mut send = SendBuf::new(std::u64::MAX);
+        assert_eq!(send.len, 0);
+        assert_eq!(send.off_front(), 0);
+
+        let first = b"something";
+
+        assert!(send.write(first, false).is_ok());
+        assert_eq!(send.off_front(), 0);
+
+        assert_eq!(send.len, 9);
+
+        let (written, fin) = send.emit(&mut buf[..4]).unwrap();
+        assert_eq!(written, 4);
+        assert_eq!(fin, false);
+        assert_eq!(&buf[..written], b"some");
+        assert_eq!(send.len, 5);
+        assert_eq!(send.off_front(), 4);
+
+        send.retransmit(3, 5);
+        assert_eq!(send.len, 6);
+        assert_eq!(send.off_front(), 3);
     }
 }
