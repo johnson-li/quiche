@@ -31,7 +31,6 @@ use std::net::Ipv4Addr;
 
 use ring::rand::*;
 use std::net::ToSocketAddrs;
-use std::time::Instant;
 use env_logger::Builder;
 use log::LevelFilter;
 
@@ -41,7 +40,6 @@ fn main() {
     Builder::new()
         .filter(None, LevelFilter::Info)
         .init();
-    let start = Instant::now();
     let mut buf = [0; 65535];
     let mut out = [0; MAX_DATAGRAM_SIZE];
 
