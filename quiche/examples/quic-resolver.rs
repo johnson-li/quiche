@@ -2,10 +2,11 @@
 extern crate log;
 
 use std::any::Any;
+use std::borrow::BorrowMut;
 use std::net;
 
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use smoltcp::phy::wait as phy_wait;
 use smoltcp::time::Instant;
 use ring::rand::*;
@@ -16,6 +17,7 @@ use env_logger::Builder;
 use log::LevelFilter;
 use smoltcp::phy::{Device, RawSocket, RxToken, Medium};
 use smoltcp::wire::IpProtocol::Udp;
+use quiche::ConnectionId;
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
 
@@ -70,9 +72,14 @@ fn main() {
         rx_token.consume(Instant::now(), |buffer| {
             let mut ethernet = EthernetFrame::new_checked(buffer).unwrap();
             let mut ipv4 = Ipv4Packet::new_checked(ethernet.payload_mut()).unwrap();
+            let mut src_data: [u8; 4] = ipv4.src_addr().0;
+            let mut src = Ipv4Addr::from(src_data);
             if ipv4.protocol() == Udp {
                 let mut udp = UdpPacket::new_checked(ipv4.payload_mut()).unwrap();
-                if udp.dst_port() == 4433 {
+                let dst_port = udp.dst_port();
+                let src_port = udp.src_port();
+                let from = SocketAddr::new(IpAddr::V4(src), src_port);
+                if dst_port == 4433 {
                     let mut payload = udp.payload_mut();
                     // println!(
                     //     "Got UDP packet {}",
@@ -82,26 +89,40 @@ fn main() {
                         payload,
                         quiche::MAX_CONN_ID_LEN,
                     ).unwrap();
-                    println!("got packet {:?}", hdr);
-                    let from = SocketAddr::new(IpAddr::V4(ipv4.src_addr()), udp.src_port());
+                    println!("Got packet {:?}", hdr);
                     let rng = SystemRandom::new();
                     let conn_id_seed =
                         ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
                     let conn_id = ring::hmac::sign(&conn_id_seed, &hdr.dcid);
                     let conn_id = &conn_id.as_ref()[..quiche::MAX_CONN_ID_LEN];
-                    let conn_id = conn_id.to_vec().into();
+                    let conn_id: ConnectionId = conn_id.to_vec().into();
                     let mut scid = [0; quiche::MAX_CONN_ID_LEN];
                     scid.copy_from_slice(&conn_id);
-                    let scid = quiche::ConnectionId::from_ref(&scid);
+                    let scid = ConnectionId::from_ref(&scid);
                     let token = hdr.token.as_ref().unwrap();
                     let odcid = validate_token(&from, token);
                     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
-                    let conn =
-                        quiche::accept(&scid, odcid.as_ref(), from, &mut config)
-                            .unwrap();
-                    let recv_info = quiche::RecvInfo { from  };
+                    config.load_cert_chain_from_pem_file("cert.crt").unwrap();
+                    config.load_priv_key_from_pem_file("cert.key").unwrap();
+                    config.set_application_protos(quiche::h3::APPLICATION_PROTOCOL).unwrap();
+                    config.set_max_idle_timeout(5000);
+                    config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
+                    config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
+                    config.set_initial_max_data(10_000_000);
+                    config.set_initial_max_stream_data_bidi_local(1_000_000);
+                    config.set_initial_max_stream_data_bidi_remote(1_000_000);
+                    config.set_initial_max_stream_data_uni(1_000_000);
+                    config.set_initial_max_streams_bidi(100);
+                    config.set_initial_max_streams_uni(100);
+                    config.set_disable_active_migration(true);
+                    config.enable_early_data();
+                    config.set_preferred_address(3281289190);
+                    let mut conn =
+                        quiche::accept(&scid, odcid.as_ref(), from, &mut config).unwrap();
+                    let recv_info = quiche::RecvInfo { from };
                     let read = conn.recv(payload, recv_info).unwrap();
                     println!("{} processed {} bytes", conn.trace_id(), read);
+                    println!("Target domain name: {}", conn.server_name().unwrap());
                 }
             }
             Ok(())
