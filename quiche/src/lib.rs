@@ -4427,6 +4427,11 @@ impl Connection {
         }
     }
 
+    /// Get the target domain name set by the client
+    pub fn target_domain_name(&mut self) -> &str {
+        ""
+    }
+
     /// Closes the connection with the given error and reason.
     ///
     /// The `app` parameter specifies whether an application close should be
