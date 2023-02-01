@@ -60,6 +60,8 @@ fn main() {
         phy_wait(socket.as_raw_fd(), None).unwrap();
         let (rx_token, tx_token) = socket.receive().unwrap();
         rx_token.consume(Instant::now(), |buffer| {
+            let mut buffer_egress = vec![0; buffer.len()];
+            buffer_egress.clone_from_slice(buffer);
             let packet_size = buffer.len();
             let mut ethernet = EthernetFrame::new_checked(buffer).unwrap();
             let mut ipv4 = Ipv4Packet::new_checked(ethernet.payload_mut()).unwrap();
@@ -129,11 +131,13 @@ fn main() {
                     info!("Target domain name: {}, forwarding to {}", conn.server_name().unwrap(), dst_ip_str);
                     let dst_ip: Ipv4Addr = dst_ip_str.parse().unwrap();
                     let dst = Ipv4Address::from_bytes(dst_ip.octets().as_slice());
-                    ipv4.set_dst_addr(dst);
-                    let mut udp = UdpPacket::new_checked(ipv4.payload_mut()).unwrap();
-                    udp.fill_checksum(IpAddress::from(src).borrow(), IpAddress::from(dst).borrow());
-                    ipv4.fill_checksum();
                     tx_token.consume(Instant::now(), packet_size, |send_buffer| {
+                        let mut ethernet = EthernetFrame::new_checked(buffer_egress).unwrap();
+                        let mut ipv4 = Ipv4Packet::new_checked(ethernet.payload_mut()).unwrap();
+                        ipv4.set_dst_addr(dst);
+                        let mut udp = UdpPacket::new_checked(ipv4.payload_mut()).unwrap();
+                        udp.fill_checksum(IpAddress::from(src).borrow(), IpAddress::from(dst).borrow());
+                        ipv4.fill_checksum();
                         send_buffer.clone_from_slice(ethernet.as_ref());
                         Ok(())
                     }).unwrap();
