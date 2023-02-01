@@ -224,7 +224,8 @@ fn main() {
                 let token = hdr.token.as_ref().unwrap();
 
                 // Do stateless retry if the client didn't send a token.
-                if token.is_empty() {
+                if false {
+                // if token.is_empty() {
                     warn!("Doing stateless retry");
 
                     let new_token = mint_token(&hdr, &from);
@@ -252,19 +253,19 @@ fn main() {
                     continue 'read;
                 }
 
-                let odcid = validate_token(&from, token);
+                // let odcid = validate_token(&from, token);
 
                 // The token was not valid, meaning the retry failed, so
                 // drop the packet.
-                if odcid.is_none() {
-                    error!("Invalid address validation token");
-                    continue 'read;
-                }
+                // if odcid.is_none() {
+                //     error!("Invalid address validation token");
+                //     continue 'read;
+                // }
 
-                if scid.len() != hdr.dcid.len() {
-                    error!("Invalid destination connection ID");
-                    continue 'read;
-                }
+                // if scid.len() != hdr.dcid.len() {
+                //     error!("Invalid destination connection ID");
+                //     continue 'read;
+                // }
 
                 // Reuse the source connection ID we sent in the Retry packet,
                 // instead of changing it again.
@@ -272,9 +273,8 @@ fn main() {
 
                 debug!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
 
-                let conn =
-                    quiche::accept(&scid, odcid.as_ref(), from, &mut config)
-                        .unwrap();
+                // let conn = quiche::accept(&scid, odcid.as_ref(), from, &mut config).unwrap();
+                let conn = quiche::accept(&scid, None, from, &mut config).unwrap();
 
                 let client = Client {
                     conn,

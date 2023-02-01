@@ -134,7 +134,7 @@ fn main() {
         panic!("send() failed: {:?}", e);
     }
 
-    debug!("written {}", write);
+    info!("[1st] written {}", write);
 
     let h3_config = quiche::h3::Config::new().unwrap();
 
@@ -338,7 +338,7 @@ fn main() {
                 panic!("send() failed: {:?}", e);
             }
 
-            info!("written {}", write);
+            info!("[2nd] written {}", write);
         }
 
         if conn.is_closed() {

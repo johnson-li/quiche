@@ -1,18 +1,15 @@
 #[macro_use]
 extern crate log;
 
-use std::any::Any;
-use std::borrow::BorrowMut;
+use std::borrow::Borrow;
 use std::net;
 
-use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use smoltcp::phy::wait as phy_wait;
+use smoltcp::phy::{TxToken, wait as phy_wait};
 use smoltcp::time::Instant;
 use ring::rand::*;
-use smoltcp::wire::{EthernetFrame, PrettyPrinter, Ipv4Packet, UdpPacket};
+use smoltcp::wire::{EthernetFrame, IpAddress, Ipv4Address, Ipv4Packet, UdpPacket};
 use std::os::unix::io::AsRawFd;
-use quiche::h3::NameValue;
 use env_logger::Builder;
 use log::LevelFilter;
 use smoltcp::phy::{Device, RawSocket, RxToken, Medium};
@@ -20,14 +17,8 @@ use smoltcp::wire::IpProtocol::Udp;
 use quiche::ConnectionId;
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
+const IFACE: &str = "br0";
 
-/// Validates a stateless retry token.
-///
-/// This checks that the ticket includes the `"quiche"` static string, and that
-/// the client IP address matches the address stored in the ticket.
-///
-/// Note that this function is only an example and doesn't do any cryptographic
-/// authenticate of the token. *It should not be used in production system*.
 fn validate_token<'a>(
     src: &net::SocketAddr, token: &'a [u8],
 ) -> Option<quiche::ConnectionId<'a>> {
@@ -57,39 +48,45 @@ fn main() {
     Builder::new()
         .filter(None, LevelFilter::Info)
         .init();
-    let mut buf = [0; 65535];
     let mut args = std::env::args();
     let cmd = &args.next().unwrap();
     if args.len() != 0 {
-        println!("Usage: {}", cmd);
-        println!("\nSee tools/apps/ for more complete implementations.");
+        info!("Usage: {}", cmd);
+        info!("\nSee tools/apps/ for more complete implementations.");
         return;
     }
-    let mut socket = RawSocket::new("lo", Medium::Ethernet).unwrap();
+    let mut socket = RawSocket::new(IFACE, Medium::Ethernet).unwrap();
     loop {
         phy_wait(socket.as_raw_fd(), None).unwrap();
-        let (rx_token, _) = socket.receive().unwrap();
+        let (rx_token, tx_token) = socket.receive().unwrap();
         rx_token.consume(Instant::now(), |buffer| {
+            let packet_size = buffer.len();
             let mut ethernet = EthernetFrame::new_checked(buffer).unwrap();
             let mut ipv4 = Ipv4Packet::new_checked(ethernet.payload_mut()).unwrap();
-            let mut src_data: [u8; 4] = ipv4.src_addr().0;
-            let mut src = Ipv4Addr::from(src_data);
+            let src_data: [u8; 4] = ipv4.src_addr().0;
+            let dst_data: [u8; 4] = ipv4.dst_addr().0;
+            let src = Ipv4Addr::from(src_data);
+            let dst = Ipv4Addr::from(dst_data);
             if ipv4.protocol() == Udp {
                 let mut udp = UdpPacket::new_checked(ipv4.payload_mut()).unwrap();
                 let dst_port = udp.dst_port();
                 let src_port = udp.src_port();
                 let from = SocketAddr::new(IpAddr::V4(src), src_port);
-                if dst_port == 4433 {
-                    let mut payload = udp.payload_mut();
-                    // println!(
-                    //     "Got UDP packet {}",
-                    //     PrettyPrinter::<Ipv4Packet<&[u8]>>::new("", &ipv4.into_inner())
-                    // );
-                    let hdr = quiche::Header::from_slice(
+                let host_ip: Ipv4Addr = "192.168.58.13".parse().unwrap();
+                print!("Check {} == {}", dst, host_ip);
+                if dst_port == 4433 && dst == host_ip {
+                    let payload = udp.payload_mut();
+                    let hdr = match quiche::Header::from_slice(
                         payload,
                         quiche::MAX_CONN_ID_LEN,
-                    ).unwrap();
-                    println!("Got packet {:?}", hdr);
+                    ) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            error!("Parsing packet header failed: {:?}", e);
+                            return Ok(());
+                        }
+                    };
+                    info!("Got packet {:?}", hdr);
                     let rng = SystemRandom::new();
                     let conn_id_seed =
                         ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
@@ -120,9 +117,26 @@ fn main() {
                     let mut conn =
                         quiche::accept(&scid, odcid.as_ref(), from, &mut config).unwrap();
                     let recv_info = quiche::RecvInfo { from };
-                    let read = conn.recv(payload, recv_info).unwrap();
-                    println!("{} processed {} bytes", conn.trace_id(), read);
-                    println!("Target domain name: {}", conn.server_name().unwrap());
+                    let read = match conn.recv(payload, recv_info) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            error!("Parsing packet failed: {:?}", e);
+                            return Ok(());
+                        }
+                    };
+                    info!("{} processed {} bytes", conn.trace_id(), read);
+                    let dst_ip_str = "195.148.127.230";
+                    info!("Target domain name: {}, forwarding to {}", conn.server_name().unwrap(), dst_ip_str);
+                    let dst_ip: Ipv4Addr = dst_ip_str.parse().unwrap();
+                    let dst = Ipv4Address::from_bytes(dst_ip.octets().as_slice());
+                    ipv4.set_dst_addr(dst);
+                    let mut udp = UdpPacket::new_checked(ipv4.payload_mut()).unwrap();
+                    udp.fill_checksum(IpAddress::from(src).borrow(), IpAddress::from(dst).borrow());
+                    ipv4.fill_checksum();
+                    tx_token.consume(Instant::now(), packet_size, |send_buffer| {
+                        send_buffer.clone_from_slice(ethernet.as_ref());
+                        Ok(())
+                    }).unwrap();
                 }
             }
             Ok(())
