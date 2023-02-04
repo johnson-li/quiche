@@ -31,7 +31,7 @@ use std::net;
 
 use std::collections::HashMap;
 
-use ring::rand::*;
+// use ring::rand::*;
 
 use quiche::h3::NameValue;
 use env_logger::Builder;
@@ -115,13 +115,14 @@ fn main() {
     config.set_initial_max_streams_uni(100);
     config.set_disable_active_migration(true);
     config.enable_early_data();
-    config.set_preferred_address(3281289190);
+    config.set_preferred_address(2130706433); // localhost
+    // config.set_preferred_address(3281289190); // mobix.xuebing.me
 
     let h3_config = quiche::h3::Config::new().unwrap();
 
-    let rng = SystemRandom::new();
-    let conn_id_seed =
-        ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
+    // let rng = SystemRandom::new();
+    // let conn_id_seed =
+    //     ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
 
     let mut clients = ClientMap::new();
 
@@ -179,16 +180,17 @@ fn main() {
                 },
             };
 
-            trace!("got packet {:?}", hdr);
+            info!("got packet {:?}, scid len: {}, dcid len: {}", hdr, hdr.scid.len(), hdr.dcid.len());
 
-            let conn_id = ring::hmac::sign(&conn_id_seed, &hdr.dcid);
-            let conn_id = &conn_id.as_ref()[..quiche::MAX_CONN_ID_LEN];
-            let conn_id = conn_id.to_vec().into();
+            // let conn_id = ring::hmac::sign(&conn_id_seed, &hdr.dcid);
+            // let conn_id = &conn_id.as_ref()[..quiche::MAX_CONN_ID_LEN];
+            // let conn_id = conn_id.to_vec().into();
+            // info!("conn id, {:?} {:?}", hdr.dcid, conn_id);
+            // let conn_id = hdr.dcid.clone();
 
             // Lookup a connection based on the packet's connection ID. If there
             // is no connection matching, create a new one.
-            let client = if !clients.contains_key(&hdr.dcid) &&
-                !clients.contains_key(&conn_id)
+            let client = if !clients.contains_key(&hdr.dcid)
             {
                 if hdr.ty != quiche::Type::Initial {
                     error!("Packet is not Initial");
@@ -215,10 +217,10 @@ fn main() {
                     continue 'read;
                 }
 
-                let mut scid = [0; quiche::MAX_CONN_ID_LEN];
-                scid.copy_from_slice(&conn_id);
-
-                let scid = quiche::ConnectionId::from_ref(&scid);
+                // let mut scid = [0; quiche::MAX_CONN_ID_LEN];
+                // scid.copy_from_slice(&conn_id);
+                // let scid = quiche::ConnectionId::from_ref(&scid);
+                let scid = hdr.scid.clone();
 
                 // Token is always present in Initial packets.
                 // let token = hdr.token.as_ref().unwrap();
@@ -273,7 +275,8 @@ fn main() {
 
                 debug!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
 
-                // let conn = quiche::accept(&scid, odcid.as_ref(), from, &mut config).unwrap();
+                // let odcid = Some(&hdr.dcid);
+                // let conn = quiche::accept(&scid, odcid, from, &mut config).unwrap();
                 let conn = quiche::accept(&scid, None, from, &mut config).unwrap();
 
                 let client = Client {
@@ -286,11 +289,12 @@ fn main() {
 
                 clients.get_mut(&scid).unwrap()
             } else {
-                match clients.get_mut(&hdr.dcid) {
-                    Some(v) => v,
-
-                    None => clients.get_mut(&conn_id).unwrap(),
-                }
+                clients.get_mut(&hdr.dcid).unwrap()
+                // match clients.get_mut(&hdr.dcid) {
+                //     Some(v) => v,
+                //
+                //     None => clients.get_mut(&conn_id).unwrap(),
+                // }
             };
 
             let recv_info = quiche::RecvInfo { from };
@@ -312,7 +316,7 @@ fn main() {
             if (client.conn.is_in_early_data() || client.conn.is_established()) &&
                 client.http3_conn.is_none()
             {
-                debug!(
+                info!(
                     "{} QUIC handshake completed, now trying HTTP/3",
                     client.conn.trace_id()
                 );

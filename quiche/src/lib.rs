@@ -1839,6 +1839,11 @@ impl Connection {
         Ok(done)
     }
 
+    // fn hex_dump(& self, buf: &[u8]) -> String {
+    //     let vec: Vec<String> = buf.iter().map(|b| format!("{:02x}", b)).collect();
+    //     vec.join("")
+    // }
+
     /// Processes a single QUIC packet received from the peer.
     ///
     /// On success the number of bytes processed from the input buffer is
@@ -1876,6 +1881,8 @@ impl Connection {
                     &self.trace_id,
                 )
             })?;
+        // info!("Recv single, scid: {} (len: {}), dcid: {} (len: {})",
+        //     self.hex_dump(&self.scid), self.scid.len(), self.hex_dump(&self.dcid), self.dcid.len());
 
         if hdr.ty == packet::Type::VersionNegotiation {
             // Version negotiation packets can only be sent by the server.

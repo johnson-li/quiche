@@ -117,12 +117,14 @@ fn main() {
         quiche::connect(url.domain(), &scid, peer_addr, &mut config).unwrap();
 
     info!(
-        "connecting to {:} from {:} with scid {}",
+        "connecting to {:} from {:} with scid {} (len: {})",
         peer_addr,
         socket.local_addr().unwrap(),
-        hex_dump(&scid)
+        hex_dump(&scid),
+        scid.len(),
     );
 
+    let start_ts = std::time::Instant::now();
     let (write, send_info) = conn.send(&mut out).expect("initial send failed");
 
     while let Err(e) = socket.send_to(&out[..write], &send_info.to) {
@@ -156,8 +158,6 @@ fn main() {
         quiche::h3::Header::new(b":path", path.as_bytes()),
         quiche::h3::Header::new(b"user-agent", b"quiche"),
     ];
-
-    let req_start = std::time::Instant::now();
 
     let mut req_sent = false;
 
@@ -198,7 +198,7 @@ fn main() {
             let recv_info = quiche::RecvInfo { from };
 
             // Process potentially coalesced packets.
-            let read = match conn.recv(&mut buf[..len], recv_info) {
+            let _ = match conn.recv(&mut buf[..len], recv_info) {
                 Ok(v) => v,
 
                 Err(e) => {
@@ -207,7 +207,19 @@ fn main() {
                 },
             };
 
-            debug!("processed {} bytes", read);
+            let hdr = match quiche::Header::from_slice(
+                buf.as_mut(),
+                quiche::MAX_CONN_ID_LEN,
+            ) {
+                Ok(v) => v,
+
+                Err(e) => {
+                    error!("Parsing packet header failed: {:?}", e);
+                    continue 'read;
+                },
+            };
+
+            info!("got packet {:?}", hdr);
         }
 
         debug!("done reading");
@@ -221,7 +233,7 @@ fn main() {
         if conn.is_established() && http3_conn.is_none() {
             info!(
                 "handshake completed in {:?}",
-                req_start.elapsed()
+                start_ts.elapsed()
             );
             let server = Ipv4Addr::from(conn.get_preferred_address());
             info!(
@@ -262,7 +274,7 @@ fn main() {
                         while let Ok(read) =
                             http3_conn.recv_body(&mut conn, stream_id, &mut buf)
                         {
-                            debug!(
+                            info!(
                                 "got {} bytes of response data on stream {}",
                                 read, stream_id
                             );
@@ -276,7 +288,7 @@ fn main() {
                     Ok((_stream_id, quiche::h3::Event::Finished)) => {
                         info!(
                             "response received in {:?}, closing...",
-                            req_start.elapsed()
+                            start_ts.elapsed()
                         );
 
                         conn.close(true, 0x00, b"kthxbye").unwrap();
@@ -350,6 +362,5 @@ fn main() {
 
 fn hex_dump(buf: &[u8]) -> String {
     let vec: Vec<String> = buf.iter().map(|b| format!("{:02x}", b)).collect();
-
     vec.join("")
 }
