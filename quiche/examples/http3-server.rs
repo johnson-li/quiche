@@ -115,8 +115,8 @@ fn main() {
     config.set_initial_max_streams_uni(100);
     config.set_disable_active_migration(true);
     config.enable_early_data();
-    config.set_preferred_address(2130706433); // localhost
-    // config.set_preferred_address(3281289190); // mobix.xuebing.me
+    // config.set_preferred_address(2130706433); // localhost
+    config.set_preferred_address(3281289190); // mobix.xuebing.me
 
     let h3_config = quiche::h3::Config::new().unwrap();
 
@@ -162,8 +162,7 @@ fn main() {
                     panic!("recv() failed: {:?}", e);
                 },
             };
-
-            info!("got {} bytes", len);
+            info!("Recv {} bytes from {:?}", len, &from);
 
             let pkt_buf = &mut buf[..len];
 
@@ -206,6 +205,7 @@ fn main() {
 
                     let out = &out[..len];
 
+                    info!("Send {} bytes to {:?}", out.len(), &from);
                     if let Err(e) = socket.send_to(out, &from) {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
                             debug!("send() would block");
@@ -244,6 +244,7 @@ fn main() {
 
                     let out = &out[..len];
 
+                    info!("Send {} bytes to {:?}", out.len(), &from);
                     if let Err(e) = socket.send_to(out, &from) {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
                             debug!("send() would block");
@@ -415,6 +416,7 @@ fn main() {
                     },
                 };
 
+                info!("Send {} bytes to {:?}", out.len(), &send_info.to);
                 if let Err(e) = socket.send_to(&out[..write], &send_info.to) {
                     if e.kind() == std::io::ErrorKind::WouldBlock {
                         debug!("send() would block");

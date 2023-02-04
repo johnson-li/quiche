@@ -127,6 +127,7 @@ fn main() {
     let start_ts = std::time::Instant::now();
     let (write, send_info) = conn.send(&mut out).expect("initial send failed");
 
+    info!("Send {} bytes to {:?}", out.len(), &send_info.to);
     while let Err(e) = socket.send_to(&out[..write], &send_info.to) {
         if e.kind() == std::io::ErrorKind::WouldBlock {
             debug!("send() would block");
@@ -135,8 +136,6 @@ fn main() {
 
         panic!("send() failed: {:?}", e);
     }
-
-    info!("[1st] written {}", write);
 
     let h3_config = quiche::h3::Config::new().unwrap();
 
@@ -192,8 +191,7 @@ fn main() {
                     panic!("recv() failed: {:?}", e);
                 },
             };
-
-            info!("got {} bytes", len);
+            info!("Recv {} bytes from {:?}", len, &from);
 
             let recv_info = quiche::RecvInfo { from };
 
@@ -341,6 +339,7 @@ fn main() {
                 },
             };
 
+            info!("Send {} bytes to {:?}", out.len(), &send_info.to);
             if let Err(e) = socket.send_to(&out[..write], &send_info.to) {
                 if e.kind() == std::io::ErrorKind::WouldBlock {
                     debug!("send() would block");
@@ -349,8 +348,6 @@ fn main() {
 
                 panic!("send() failed: {:?}", e);
             }
-
-            info!("[2nd] written {}", write);
         }
 
         if conn.is_closed() {
