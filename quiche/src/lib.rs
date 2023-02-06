@@ -321,6 +321,7 @@ use std::pin::Pin;
 use std::str::FromStr;
 
 use std::collections::VecDeque;
+use crate::frame::Frame;
 
 /// The current QUIC wire version.
 pub const PROTOCOL_VERSION: u32 = PROTOCOL_VERSION_V1;
@@ -1739,6 +1740,26 @@ impl Connection {
         Ok(())
     }
 
+
+    /// Processes QUIC packets received from the peer.
+    ///
+    /// It only supports initial packets to provide fast CLIENT INITIAL parsing.
+    pub fn recv_lite(&mut self, buf: &mut [u8], info: RecvInfo) -> Result<usize> {
+        let len = buf.len();
+        if len == 0 {
+            return Err(Error::BufferTooShort);
+        }
+        let _ = match self.recv_single_lite(&mut buf[..len], &info) {
+            Ok(v) => v,
+            Err(Error::Done) => 0,
+            Err(e) => {
+                self.close(false, e.to_wire(), b"").ok();
+                return Err(e);
+            },
+        };
+        Ok(0)
+    }
+
     /// Processes QUIC packets received from the peer.
     ///
     /// On success the number of bytes processed from the input buffer is
@@ -1843,6 +1864,132 @@ impl Connection {
     //     let vec: Vec<String> = buf.iter().map(|b| format!("{:02x}", b)).collect();
     //     vec.join("")
     // }
+
+    /// Processes a single QUIC packet received from the peer.
+    fn recv_single_lite(&mut self, buf: &mut [u8], info: &RecvInfo) -> Result<usize> {
+        let now = time::Instant::now();
+        let mut b = octets::OctetsMut::with_slice(buf);
+        let mut hdr =
+            Header::from_bytes(&mut b, self.scid.len()).map_err(|e| {
+                drop_pkt_on_err(
+                    e,
+                    self.recv_count,
+                    self.is_server,
+                    &self.trace_id,
+                )
+            })?;
+        let payload_len = b.get_varint().map_err(|e| {
+            drop_pkt_on_err(
+                e.into(),
+                self.recv_count,
+                self.is_server,
+                &self.trace_id,
+            )
+        })? as usize;
+        if payload_len > b.cap() {
+            return Err(drop_pkt_on_err(
+                Error::InvalidPacket,
+                self.recv_count,
+                self.is_server,
+                &self.trace_id,
+            ));
+        }
+        if !self.derived_initial_secrets {
+            let (aead_open, aead_seal) = crypto::derive_initial_key_material(
+                &hdr.dcid,
+                self.version,
+                self.is_server,
+            )?;
+
+            self.pkt_num_spaces[packet::EPOCH_INITIAL].crypto_open =
+                Some(aead_open);
+            self.pkt_num_spaces[packet::EPOCH_INITIAL].crypto_seal =
+                Some(aead_seal);
+
+            self.derived_initial_secrets = true;
+        }
+        let epoch = hdr.ty.to_epoch()?;
+        let aead = self.pkt_num_spaces[epoch].crypto_open.as_ref().unwrap();
+
+        println!("before decrypting hdr: {:?}", now.elapsed());
+        packet::decrypt_hdr(&mut b, &mut hdr, aead).map_err(|e| {
+            drop_pkt_on_err(e, self.recv_count, self.is_server, &self.trace_id)
+        })?;
+
+        println!("before decrypting pkt num: {:?}", now.elapsed());
+        let pn = packet::decode_pkt_num(
+            self.pkt_num_spaces[epoch].largest_rx_pkt_num,
+            hdr.pkt_num,
+            hdr.pkt_num_len,
+        );
+
+        let pn_len = hdr.pkt_num_len;
+
+        println!("before decrypting pkt: {:?}", now.elapsed());
+        let mut payload = packet::decrypt_pkt(
+            &mut b,
+            pn,
+            pn_len,
+            payload_len,
+            aead,
+        )
+            .map_err(|e| {
+                drop_pkt_on_err(e, self.recv_count, self.is_server, &self.trace_id)
+            })?;
+
+        // Packets with no frames are invalid.
+        if payload.cap() == 0 {
+            return Err(Error::InvalidPacket);
+        }
+
+        if self.is_server && !self.got_peer_conn_id {
+            self.dcid = hdr.scid.clone();
+
+            if !self.did_retry &&
+                (self.version >= PROTOCOL_VERSION_DRAFT28 ||
+                    self.version == PROTOCOL_VERSION_V1)
+            {
+                self.local_transport_params
+                    .original_destination_connection_id =
+                    Some(hdr.dcid.to_vec().into());
+
+                self.encode_transport_params()?;
+            }
+
+            self.got_peer_conn_id = true;
+        }
+
+        while payload.cap() > 0 {
+            let frame = frame::Frame::from_bytes(&mut payload, hdr.ty)?;
+            println!("Got frame: {:?}", frame);
+            match frame {
+                frame::Frame::Crypto { data } => {
+                    self.pkt_num_spaces[epoch].crypto_stream.recv.write(data)?;
+                    let mut crypto_buf = [0; 512];
+                    let level = crypto::Level::from_epoch(epoch);
+                    let stream = &mut self.pkt_num_spaces[epoch].crypto_stream;
+                    while let Ok((read, _)) = stream.recv.emit(&mut crypto_buf) {
+                        let recv_buf = &crypto_buf[..read];
+                        self.handshake.provide_data(level, recv_buf)?;
+                    }
+                    println!("Is established: {}", self.is_established());
+                    self.handshake.set_sni_only();
+                    match self.handshake.do_handshake() {
+                        Ok(_) => {
+                            println!("Do handshake without issue");
+                        },
+                        Err(Error::Done) => {
+                            println!("Do handshake with issue");
+                        }
+                        Err(e) => return Err(e)
+                    };
+                }
+                _ => {}
+            }
+        }
+        println!("asdf: {:?}", now.elapsed());
+        Ok(0)
+    }
 
     /// Processes a single QUIC packet received from the peer.
     ///

@@ -548,6 +548,10 @@ impl Handshake {
         map_result_ssl(self, rc)
     }
 
+    pub fn set_sni_only(&mut self) {
+        unsafe { SSL_set_sni_only(self.as_mut_ptr()) };
+    }
+
     pub fn do_handshake(&mut self) -> Result<()> {
         let rc = unsafe { SSL_do_handshake(self.as_mut_ptr()) };
         map_result_ssl(self, rc)
@@ -1199,6 +1203,8 @@ extern {
     );
 
     fn SSL_get_servername(ssl: *const SSL, ty: c_int) -> *const c_char;
+
+    fn SSL_set_sni_only(ssl: *mut SSL);
 
     fn SSL_provide_quic_data(
         ssl: *mut SSL, level: crypto::Level, data: *const u8, len: usize,

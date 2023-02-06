@@ -2,47 +2,46 @@
 extern crate log;
 
 use std::borrow::Borrow;
-use std::net;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use smoltcp::phy::{TxToken, wait as phy_wait};
 use smoltcp::time::Instant;
-use ring::rand::*;
+// use ring::rand::*;
 use smoltcp::wire::{EthernetFrame, IpAddress, Ipv4Address, Ipv4Packet, UdpPacket};
 use std::os::unix::io::AsRawFd;
 use env_logger::Builder;
 use log::LevelFilter;
 use smoltcp::phy::{Device, RawSocket, RxToken, Medium};
 use smoltcp::wire::IpProtocol::Udp;
-use quiche::ConnectionId;
+// use quiche::ConnectionId;
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
 const IFACE: &str = "br0";
 
-fn validate_token<'a>(
-    src: &net::SocketAddr, token: &'a [u8],
-) -> Option<quiche::ConnectionId<'a>> {
-    if token.len() < 6 {
-        return None;
-    }
-
-    if &token[..6] != b"quiche" {
-        return None;
-    }
-
-    let token = &token[6..];
-
-    let addr = match src.ip() {
-        std::net::IpAddr::V4(a) => a.octets().to_vec(),
-        std::net::IpAddr::V6(a) => a.octets().to_vec(),
-    };
-
-    if token.len() < addr.len() || &token[..addr.len()] != addr.as_slice() {
-        return None;
-    }
-
-    Some(quiche::ConnectionId::from_ref(&token[addr.len()..]))
-}
+// fn validate_token<'a>(
+//     src: &net::SocketAddr, token: &'a [u8],
+// ) -> Option<quiche::ConnectionId<'a>> {
+//     if token.len() < 6 {
+//         return None;
+//     }
+//
+//     if &token[..6] != b"quiche" {
+//         return None;
+//     }
+//
+//     let token = &token[6..];
+//
+//     let addr = match src.ip() {
+//         std::net::IpAddr::V4(a) => a.octets().to_vec(),
+//         std::net::IpAddr::V6(a) => a.octets().to_vec(),
+//     };
+//
+//     if token.len() < addr.len() || &token[..addr.len()] != addr.as_slice() {
+//         return None;
+//     }
+//
+//     Some(quiche::ConnectionId::from_ref(&token[addr.len()..]))
+// }
 
 fn main() {
     Builder::new()
@@ -55,6 +54,21 @@ fn main() {
         info!("\nSee tools/apps/ for more complete implementations.");
         return;
     }
+    let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+    config.load_cert_chain_from_pem_file("cert.crt").unwrap();
+    config.load_priv_key_from_pem_file("cert.key").unwrap();
+    config.set_application_protos(quiche::h3::APPLICATION_PROTOCOL).unwrap();
+    config.set_max_idle_timeout(5000);
+    config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
+    config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
+    config.set_initial_max_data(10_000_000);
+    config.set_initial_max_stream_data_bidi_local(1_000_000);
+    config.set_initial_max_stream_data_bidi_remote(1_000_000);
+    config.set_initial_max_stream_data_uni(1_000_000);
+    config.set_initial_max_streams_bidi(100);
+    config.set_initial_max_streams_uni(100);
+    config.set_disable_active_migration(true);
+    config.enable_early_data();
     let mut socket = RawSocket::new(IFACE, Medium::Ethernet).unwrap();
     loop {
         phy_wait(socket.as_raw_fd(), None).unwrap();
@@ -75,7 +89,6 @@ fn main() {
                 let src_port = udp.src_port();
                 let from = SocketAddr::new(IpAddr::V4(src), src_port);
                 let host_ip: Ipv4Addr = "192.168.58.13".parse().unwrap();
-                print!("Check {} == {}", dst, host_ip);
                 if dst_port == 4433 && dst == host_ip {
                     let payload = udp.payload_mut();
                     let hdr = match quiche::Header::from_slice(
@@ -89,43 +102,30 @@ fn main() {
                         }
                     };
                     info!("Got packet {:?}", hdr);
-                    let rng = SystemRandom::new();
-                    let conn_id_seed =
-                        ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
-                    let conn_id = ring::hmac::sign(&conn_id_seed, &hdr.dcid);
-                    let conn_id = &conn_id.as_ref()[..quiche::MAX_CONN_ID_LEN];
-                    let conn_id: ConnectionId = conn_id.to_vec().into();
-                    let mut scid = [0; quiche::MAX_CONN_ID_LEN];
-                    scid.copy_from_slice(&conn_id);
-                    let scid = ConnectionId::from_ref(&scid);
-                    let token = hdr.token.as_ref().unwrap();
-                    let odcid = validate_token(&from, token);
-                    let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
-                    config.load_cert_chain_from_pem_file("cert.crt").unwrap();
-                    config.load_priv_key_from_pem_file("cert.key").unwrap();
-                    config.set_application_protos(quiche::h3::APPLICATION_PROTOCOL).unwrap();
-                    config.set_max_idle_timeout(5000);
-                    config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
-                    config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
-                    config.set_initial_max_data(10_000_000);
-                    config.set_initial_max_stream_data_bidi_local(1_000_000);
-                    config.set_initial_max_stream_data_bidi_remote(1_000_000);
-                    config.set_initial_max_stream_data_uni(1_000_000);
-                    config.set_initial_max_streams_bidi(100);
-                    config.set_initial_max_streams_uni(100);
-                    config.set_disable_active_migration(true);
-                    config.enable_early_data();
-                    config.set_preferred_address(3281289190);
+                    let start_ts = std::time::Instant::now();
+                    // let rng = SystemRandom::new();
+                    // let conn_id_seed =
+                    //     ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
+                    // let conn_id = ring::hmac::sign(&conn_id_seed, &hdr.dcid);
+                    // let conn_id = &conn_id.as_ref()[..quiche::MAX_CONN_ID_LEN];
+                    // let conn_id: ConnectionId = conn_id.to_vec().into();
+                    // let mut scid = [0; quiche::MAX_CONN_ID_LEN];
+                    // scid.copy_from_slice(&conn_id);
+                    // let scid = ConnectionId::from_ref(&scid);
+                    let scid = hdr.scid.clone();
+                    // let token = hdr.token.as_ref().unwrap();
+                    // let odcid = validate_token(&from, token);
                     let mut conn =
-                        quiche::accept(&scid, odcid.as_ref(), from, &mut config).unwrap();
+                        quiche::accept(&scid, None, from, &mut config).unwrap();
                     let recv_info = quiche::RecvInfo { from };
-                    let read = match conn.recv(payload, recv_info) {
+                    let read = match conn.recv_lite(payload, recv_info) {
                         Ok(v) => v,
                         Err(e) => {
                             error!("Parsing packet failed: {:?}", e);
                             return Ok(());
                         }
                     };
+                    info!("It takes {:?} to parse the packet", start_ts.elapsed());
                     info!("{} processed {} bytes", conn.trace_id(), read);
                     let dst_ip_str = "195.148.127.230";
                     info!("Target domain name: {}, forwarding to {}", conn.server_name().unwrap(), dst_ip_str);
@@ -139,6 +139,7 @@ fn main() {
                         udp.fill_checksum(IpAddress::from(src).borrow(), IpAddress::from(dst).borrow());
                         ipv4.fill_checksum();
                         send_buffer.clone_from_slice(ethernet.as_ref());
+                        info!("It takes {:?} to forward the packet", start_ts.elapsed());
                         Ok(())
                     }).unwrap();
                 }
