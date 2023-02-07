@@ -1907,7 +1907,10 @@ impl Connection {
             self.derived_initial_secrets = true;
         }
         let epoch = hdr.ty.to_epoch()?;
-        let aead = self.pkt_num_spaces[epoch].crypto_open.as_ref().unwrap();
+        let aead = match self.pkt_num_spaces[epoch].crypto_open.as_ref() {
+            Some(v) => v,
+            _ => return Err(Error::InvalidPacket)
+        };
 
         packet::decrypt_hdr(&mut b, &mut hdr, aead).map_err(|e| {
             drop_pkt_on_err(e, self.recv_count, self.is_server, &self.trace_id)

@@ -500,16 +500,17 @@ impl Handshake {
     }
 
     pub fn server_name(&self) -> Option<&str> {
-        let s = unsafe {
+        unsafe {
             let ptr = SSL_get_servername(
                 self.as_ptr(),
                 0, // TLSEXT_NAMETYPE_host_name
             );
-
-            ffi::CStr::from_ptr(ptr)
+            return if ptr != ptr::null() {
+                ffi::CStr::from_ptr(ptr).to_str().ok()
+            } else {
+                None
+            }
         };
-
-        s.to_str().ok()
     }
 
     pub fn set_session(&mut self, session: &[u8]) -> Result<()> {
