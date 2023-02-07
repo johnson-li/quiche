@@ -2,48 +2,38 @@
 extern crate log;
 
 use std::borrow::Borrow;
-
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use smoltcp::phy::{TxToken, wait as phy_wait};
 use smoltcp::time::Instant;
-// use ring::rand::*;
 use smoltcp::wire::{EthernetFrame, IpAddress, Ipv4Address, Ipv4Packet, UdpPacket};
 use std::os::unix::io::AsRawFd;
 use env_logger::Builder;
 use log::LevelFilter;
 use smoltcp::phy::{Device, RawSocket, RxToken, Medium};
 use smoltcp::wire::IpProtocol::Udp;
-// use quiche::ConnectionId;
+use std::net::UdpSocket;
+use std::ops::Deref;
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
 const IFACE: &str = "br0";
 
-// fn validate_token<'a>(
-//     src: &net::SocketAddr, token: &'a [u8],
-// ) -> Option<quiche::ConnectionId<'a>> {
-//     if token.len() < 6 {
-//         return None;
-//     }
-//
-//     if &token[..6] != b"quiche" {
-//         return None;
-//     }
-//
-//     let token = &token[6..];
-//
-//     let addr = match src.ip() {
-//         std::net::IpAddr::V4(a) => a.octets().to_vec(),
-//         std::net::IpAddr::V6(a) => a.octets().to_vec(),
-//     };
-//
-//     if token.len() < addr.len() || &token[..addr.len()] != addr.as_slice() {
-//         return None;
-//     }
-//
-//     Some(quiche::ConnectionId::from_ref(&token[addr.len()..]))
-// }
+fn dns_query(name: &str, socket: &UdpSocket) {
+    let mut query_data: Vec<u8> = b"\xdc\x5b\x01\x00\x00\x01\x00\x00\x00\x00\x00\x01".to_vec();
+    let mut suffix = b"\x00\x00\x01\x00\x01\x00\x00\x29\x05\xac\x00\x00\x00\x00\x00\x00".to_vec();
+    for s in name.split(".") {
+        let mut v = [[s.len() as u8].as_ref(), s.as_bytes()].concat();
+        query_data.append(v.as_mut());
+    }
+    query_data.append(suffix.as_mut());
+    socket.send(query_data.deref()).expect("couldn't send message");
+    let mut recv_data = [0; 1024];
+    let (_, _) = socket.recv_from(&mut recv_data).unwrap();
+}
 
 fn main() {
+    let dns_socket = UdpSocket::bind("0.0.0.0:0").expect("Failed to bind to address");
+    // socket.connect("127.0.0.1:8053").expect("connect function failed");
+    dns_socket.connect("127.0.0.53:53").expect("connect function failed");
     Builder::new()
         .filter(None, LevelFilter::Info)
         .init();
@@ -103,18 +93,7 @@ fn main() {
                     };
                     info!("Got packet {:?}", hdr);
                     let start_ts = std::time::Instant::now();
-                    // let rng = SystemRandom::new();
-                    // let conn_id_seed =
-                    //     ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
-                    // let conn_id = ring::hmac::sign(&conn_id_seed, &hdr.dcid);
-                    // let conn_id = &conn_id.as_ref()[..quiche::MAX_CONN_ID_LEN];
-                    // let conn_id: ConnectionId = conn_id.to_vec().into();
-                    // let mut scid = [0; quiche::MAX_CONN_ID_LEN];
-                    // scid.copy_from_slice(&conn_id);
-                    // let scid = ConnectionId::from_ref(&scid);
                     let scid = hdr.scid.clone();
-                    // let token = hdr.token.as_ref().unwrap();
-                    // let odcid = validate_token(&from, token);
                     let mut conn =
                         quiche::accept(&scid, None, from, &mut config).unwrap();
                     let recv_info = quiche::RecvInfo { from };
@@ -127,6 +106,8 @@ fn main() {
                     };
                     info!("It takes {:?} to parse the packet", start_ts.elapsed());
                     info!("{} processed {} bytes", conn.trace_id(), read);
+                    // dns_query(conn.server_name().unwrap(), &dns_socket);
+                    info!("It takes {:?} to finish DNS query", start_ts.elapsed());
                     let dst_ip_str = "195.148.127.230";
                     info!("Target domain name: {}, forwarding to {}", conn.server_name().unwrap(), dst_ip_str);
                     let dst_ip: Ipv4Addr = dst_ip_str.parse().unwrap();

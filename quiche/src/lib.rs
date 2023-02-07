@@ -321,7 +321,6 @@ use std::pin::Pin;
 use std::str::FromStr;
 
 use std::collections::VecDeque;
-use crate::frame::Frame;
 
 /// The current QUIC wire version.
 pub const PROTOCOL_VERSION: u32 = PROTOCOL_VERSION_V1;
@@ -1866,8 +1865,7 @@ impl Connection {
     // }
 
     /// Processes a single QUIC packet received from the peer.
-    fn recv_single_lite(&mut self, buf: &mut [u8], info: &RecvInfo) -> Result<usize> {
-        let now = time::Instant::now();
+    fn recv_single_lite(&mut self, buf: &mut [u8], _: &RecvInfo) -> Result<usize> {
         let mut b = octets::OctetsMut::with_slice(buf);
         let mut hdr =
             Header::from_bytes(&mut b, self.scid.len()).map_err(|e| {
@@ -1911,12 +1909,10 @@ impl Connection {
         let epoch = hdr.ty.to_epoch()?;
         let aead = self.pkt_num_spaces[epoch].crypto_open.as_ref().unwrap();
 
-        println!("before decrypting hdr: {:?}", now.elapsed());
         packet::decrypt_hdr(&mut b, &mut hdr, aead).map_err(|e| {
             drop_pkt_on_err(e, self.recv_count, self.is_server, &self.trace_id)
         })?;
 
-        println!("before decrypting pkt num: {:?}", now.elapsed());
         let pn = packet::decode_pkt_num(
             self.pkt_num_spaces[epoch].largest_rx_pkt_num,
             hdr.pkt_num,
@@ -1925,7 +1921,6 @@ impl Connection {
 
         let pn_len = hdr.pkt_num_len;
 
-        println!("before decrypting pkt: {:?}", now.elapsed());
         let mut payload = packet::decrypt_pkt(
             &mut b,
             pn,
@@ -1961,7 +1956,6 @@ impl Connection {
 
         while payload.cap() > 0 {
             let frame = frame::Frame::from_bytes(&mut payload, hdr.ty)?;
-            println!("Got frame: {:?}", frame);
             match frame {
                 frame::Frame::Crypto { data } => {
                     self.pkt_num_spaces[epoch].crypto_stream.recv.write(data)?;
@@ -1972,14 +1966,11 @@ impl Connection {
                         let recv_buf = &crypto_buf[..read];
                         self.handshake.provide_data(level, recv_buf)?;
                     }
-                    println!("Is established: {}", self.is_established());
                     self.handshake.set_sni_only();
                     match self.handshake.do_handshake() {
                         Ok(_) => {
-                            println!("Do handshake without issue");
                         },
                         Err(Error::Done) => {
-                            println!("Do handshake with issue");
                         }
                         Err(e) => return Err(e)
                     };
@@ -1987,7 +1978,6 @@ impl Connection {
                 _ => {}
             }
         }
-        println!("asdf: {:?}", now.elapsed());
         Ok(0)
     }
 
