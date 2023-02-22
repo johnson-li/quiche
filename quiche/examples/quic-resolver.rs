@@ -5,7 +5,7 @@ use std::any::Any;
 use std::net;
 
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use smoltcp::phy::wait as phy_wait;
 use smoltcp::time::Instant;
 use ring::rand::*;
@@ -83,7 +83,8 @@ fn main() {
                         quiche::MAX_CONN_ID_LEN,
                     ).unwrap();
                     println!("got packet {:?}", hdr);
-                    let from = SocketAddr::new(IpAddr::V4(ipv4.src_addr()), udp.src_port());
+                    let src = Ipv4Addr::from(ipv4.src_addr().as_bytes());
+                    let from = SocketAddr::new(IpAddr::V4(src), udp.src_port());
                     let rng = SystemRandom::new();
                     let conn_id_seed =
                         ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
