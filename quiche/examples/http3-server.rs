@@ -31,7 +31,7 @@ use std::net;
 
 use std::collections::HashMap;
 
-use ring::rand::*;
+// use ring::rand::*;
 
 use quiche::h3::NameValue;
 use env_logger::Builder;
@@ -115,13 +115,14 @@ fn main() {
     config.set_initial_max_streams_uni(100);
     config.set_disable_active_migration(true);
     config.enable_early_data();
-    config.set_preferred_address(3281289190);
+    // config.set_preferred_address(2130706433); // localhost
+    config.set_preferred_address(3281289190); // mobix.xuebing.me
 
     let h3_config = quiche::h3::Config::new().unwrap();
 
-    let rng = SystemRandom::new();
-    let conn_id_seed =
-        ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
+    // let rng = SystemRandom::new();
+    // let conn_id_seed =
+    //     ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
 
     let mut clients = ClientMap::new();
 
@@ -161,8 +162,7 @@ fn main() {
                     panic!("recv() failed: {:?}", e);
                 },
             };
-
-            info!("got {} bytes", len);
+            info!("Recv {} bytes from {:?}", len, &from);
 
             let pkt_buf = &mut buf[..len];
 
@@ -179,16 +179,17 @@ fn main() {
                 },
             };
 
-            trace!("got packet {:?}", hdr);
+            info!("got packet {:?}, scid len: {}, dcid len: {}", hdr, hdr.scid.len(), hdr.dcid.len());
 
-            let conn_id = ring::hmac::sign(&conn_id_seed, &hdr.dcid);
-            let conn_id = &conn_id.as_ref()[..quiche::MAX_CONN_ID_LEN];
-            let conn_id = conn_id.to_vec().into();
+            // let conn_id = ring::hmac::sign(&conn_id_seed, &hdr.dcid);
+            // let conn_id = &conn_id.as_ref()[..quiche::MAX_CONN_ID_LEN];
+            // let conn_id = conn_id.to_vec().into();
+            // info!("conn id, {:?} {:?}", hdr.dcid, conn_id);
+            // let conn_id = hdr.dcid.clone();
 
             // Lookup a connection based on the packet's connection ID. If there
             // is no connection matching, create a new one.
-            let client = if !clients.contains_key(&hdr.dcid) &&
-                !clients.contains_key(&conn_id)
+            let client = if !clients.contains_key(&hdr.dcid)
             {
                 if hdr.ty != quiche::Type::Initial {
                     error!("Packet is not Initial");
@@ -204,6 +205,7 @@ fn main() {
 
                     let out = &out[..len];
 
+                    info!("Send {} bytes to {:?}", out.len(), &from);
                     if let Err(e) = socket.send_to(out, &from) {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
                             debug!("send() would block");
@@ -215,16 +217,17 @@ fn main() {
                     continue 'read;
                 }
 
-                let mut scid = [0; quiche::MAX_CONN_ID_LEN];
-                scid.copy_from_slice(&conn_id);
-
-                let scid = quiche::ConnectionId::from_ref(&scid);
+                // let mut scid = [0; quiche::MAX_CONN_ID_LEN];
+                // scid.copy_from_slice(&conn_id);
+                // let scid = quiche::ConnectionId::from_ref(&scid);
+                let scid = hdr.scid.clone();
 
                 // Token is always present in Initial packets.
-                let token = hdr.token.as_ref().unwrap();
+                // let token = hdr.token.as_ref().unwrap();
 
                 // Do stateless retry if the client didn't send a token.
-                if token.is_empty() {
+                if false {
+                // if token.is_empty() {
                     warn!("Doing stateless retry");
 
                     let new_token = mint_token(&hdr, &from);
@@ -241,6 +244,7 @@ fn main() {
 
                     let out = &out[..len];
 
+                    info!("Send {} bytes to {:?}", out.len(), &from);
                     if let Err(e) = socket.send_to(out, &from) {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
                             debug!("send() would block");
@@ -252,19 +256,19 @@ fn main() {
                     continue 'read;
                 }
 
-                let odcid = validate_token(&from, token);
+                // let odcid = validate_token(&from, token);
 
                 // The token was not valid, meaning the retry failed, so
                 // drop the packet.
-                if odcid.is_none() {
-                    error!("Invalid address validation token");
-                    continue 'read;
-                }
+                // if odcid.is_none() {
+                //     error!("Invalid address validation token");
+                //     continue 'read;
+                // }
 
-                if scid.len() != hdr.dcid.len() {
-                    error!("Invalid destination connection ID");
-                    continue 'read;
-                }
+                // if scid.len() != hdr.dcid.len() {
+                //     error!("Invalid destination connection ID");
+                //     continue 'read;
+                // }
 
                 // Reuse the source connection ID we sent in the Retry packet,
                 // instead of changing it again.
@@ -272,9 +276,9 @@ fn main() {
 
                 debug!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
 
-                let conn =
-                    quiche::accept(&scid, odcid.as_ref(), from, &mut config)
-                        .unwrap();
+                // let odcid = Some(&hdr.dcid);
+                // let conn = quiche::accept(&scid, odcid, from, &mut config).unwrap();
+                let conn = quiche::accept(&scid, None, from, &mut config).unwrap();
 
                 let client = Client {
                     conn,
@@ -286,11 +290,12 @@ fn main() {
 
                 clients.get_mut(&scid).unwrap()
             } else {
-                match clients.get_mut(&hdr.dcid) {
-                    Some(v) => v,
-
-                    None => clients.get_mut(&conn_id).unwrap(),
-                }
+                clients.get_mut(&hdr.dcid).unwrap()
+                // match clients.get_mut(&hdr.dcid) {
+                //     Some(v) => v,
+                //
+                //     None => clients.get_mut(&conn_id).unwrap(),
+                // }
             };
 
             let recv_info = quiche::RecvInfo { from };
@@ -312,7 +317,7 @@ fn main() {
             if (client.conn.is_in_early_data() || client.conn.is_established()) &&
                 client.http3_conn.is_none()
             {
-                debug!(
+                info!(
                     "{} QUIC handshake completed, now trying HTTP/3",
                     client.conn.trace_id()
                 );
@@ -411,6 +416,7 @@ fn main() {
                     },
                 };
 
+                info!("Send {} bytes to {:?}", out.len(), &send_info.to);
                 if let Err(e) = socket.send_to(&out[..write], &send_info.to) {
                     if e.kind() == std::io::ErrorKind::WouldBlock {
                         debug!("send() would block");
@@ -465,37 +471,6 @@ fn mint_token(hdr: &quiche::Header, src: &net::SocketAddr) -> Vec<u8> {
     token
 }
 
-/// Validates a stateless retry token.
-///
-/// This checks that the ticket includes the `"quiche"` static string, and that
-/// the client IP address matches the address stored in the ticket.
-///
-/// Note that this function is only an example and doesn't do any cryptographic
-/// authenticate of the token. *It should not be used in production system*.
-fn validate_token<'a>(
-    src: &net::SocketAddr, token: &'a [u8],
-) -> Option<quiche::ConnectionId<'a>> {
-    if token.len() < 6 {
-        return None;
-    }
-
-    if &token[..6] != b"quiche" {
-        return None;
-    }
-
-    let token = &token[6..];
-
-    let addr = match src.ip() {
-        std::net::IpAddr::V4(a) => a.octets().to_vec(),
-        std::net::IpAddr::V6(a) => a.octets().to_vec(),
-    };
-
-    if token.len() < addr.len() || &token[..addr.len()] != addr.as_slice() {
-        return None;
-    }
-
-    Some(quiche::ConnectionId::from_ref(&token[addr.len()..]))
-}
 
 /// Handles incoming HTTP/3 requests.
 fn handle_request(

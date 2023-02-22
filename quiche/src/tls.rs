@@ -500,16 +500,17 @@ impl Handshake {
     }
 
     pub fn server_name(&self) -> Option<&str> {
-        let s = unsafe {
+        unsafe {
             let ptr = SSL_get_servername(
                 self.as_ptr(),
                 0, // TLSEXT_NAMETYPE_host_name
             );
-
-            ffi::CStr::from_ptr(ptr)
+            return if ptr != ptr::null() {
+                ffi::CStr::from_ptr(ptr).to_str().ok()
+            } else {
+                None
+            }
         };
-
-        s.to_str().ok()
     }
 
     pub fn set_session(&mut self, session: &[u8]) -> Result<()> {
@@ -546,6 +547,10 @@ impl Handshake {
             )
         };
         map_result_ssl(self, rc)
+    }
+
+    pub fn set_sni_only(&mut self) {
+        unsafe { SSL_set_sni_only(self.as_mut_ptr()) };
     }
 
     pub fn do_handshake(&mut self) -> Result<()> {
@@ -1199,6 +1204,8 @@ extern {
     );
 
     fn SSL_get_servername(ssl: *const SSL, ty: c_int) -> *const c_char;
+
+    fn SSL_set_sni_only(ssl: *mut SSL);
 
     fn SSL_provide_quic_data(
         ssl: *mut SSL, level: crypto::Level, data: *const u8, len: usize,
