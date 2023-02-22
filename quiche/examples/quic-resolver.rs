@@ -99,6 +99,7 @@ fn main() {
             let host_ip: Ipv4Addr = "192.168.58.13".parse().unwrap();
             // let host_ip: Ipv4Addr = "127.0.0.1".parse().unwrap();
             if dst_port == 4433 && dst == host_ip {
+                let start_ts = std::time::Instant::now();
                 let payload = udp.payload_mut();
                 info!("Payload size: {}", payload.len());
                 let hdr = match quiche::Header::from_slice(
@@ -112,7 +113,6 @@ fn main() {
                     }
                 };
                 // info!("Got packet {:?}", hdr);
-                let start_ts = std::time::Instant::now();
                 let scid = hdr.scid.clone();
                 let mut conn =
                     quiche::accept(&scid, None, from, &mut config).unwrap();
@@ -128,11 +128,12 @@ fn main() {
                 info!("{} processed {} bytes", conn.trace_id(), read);
                 // dns_query(conn.server_name().unwrap(), &dns_socket);
                 info!("It takes {} ms to finish DNS query", start_ts.elapsed().as_millis());
-                let dst_ip_str = "195.148.127.230";
                 let server_name = match conn.server_name() {
                     Some(v) => v,
                     _ => continue
                 };
+                // let server_name = "mobix.aeacus.xuebing.me";
+                let dst_ip_str = "195.148.127.230";
                 info!("Target domain name: {}, forwarding to {}", server_name, dst_ip_str);
                 let dst_ip: Ipv4Addr = dst_ip_str.parse().unwrap();
                 let dst = Ipv4Address::from_bytes(dst_ip.octets().as_slice());
