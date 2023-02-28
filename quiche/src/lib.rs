@@ -2662,9 +2662,13 @@ impl Connection {
             {
                 Ok(v) => v,
 
-                Err(Error::BufferTooShort) | Err(Error::Done) => break,
+                Err(Error::BufferTooShort) | Err(Error::Done) => {
+                    break
+                },
 
-                Err(e) => return Err(e),
+                Err(e) => {
+                    return Err(e)
+                },
             };
 
             done += written;

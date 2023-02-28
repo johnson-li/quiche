@@ -230,8 +230,8 @@ fn main() {
         // Create a new HTTP/3 connection once the QUIC connection is established.
         if conn.is_established() && http3_conn.is_none() {
             info!(
-                "handshake completed in {:?}",
-                start_ts.elapsed()
+                "[{}] handshake completed in {:?}",
+                url, start_ts.elapsed()
             );
             let server = Ipv4Addr::from(conn.get_preferred_address());
             info!(

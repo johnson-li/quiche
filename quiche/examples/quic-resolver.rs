@@ -2,7 +2,11 @@
 extern crate log;
 
 use std::borrow::Borrow;
+use serde_json::{Value};
 use std::mem;
+use std::{thread, time};
+use std::fs::File;
+use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use smoltcp::wire::{EthernetFrame, IpAddress, Ipv4Address, Ipv4Packet, UdpPacket};
 use env_logger::Builder;
@@ -49,7 +53,23 @@ fn init_quic_config() -> Config {
     config
 }
 
+fn get_ns_delay() -> [f64; 500] {
+    let mut ns_delay = [0.0; 500];
+    let mut file = File::open("../resources/results/dns_ns_delay_values.json").expect("Failed to open dns_ttl_ns.json");
+    let mut contents = String::new();
+    let _ = file.read_to_string(&mut contents);
+    let parsed: Value = serde_json::from_str(contents.as_ref()).unwrap();
+    let obj = parsed.as_array().unwrap();
+    let mut i = 0;
+    for v in obj.into_iter() {
+        ns_delay[i] = v.as_f64().unwrap();
+        i += 1;
+    }
+    return ns_delay;
+}
+
 fn main() {
+    let ns_delay = get_ns_delay();
     Builder::new()
         .filter(None, LevelFilter::Info)
         .init();
@@ -132,9 +152,21 @@ fn main() {
                     Some(v) => v,
                     _ => continue
                 };
-                // let server_name = "mobix.aeacus.xuebing.me";
-                let dst_ip_str = "195.148.127.230";
-                info!("Target domain name: {}, forwarding to {}", server_name, dst_ip_str);
+
+                let split = server_name.split(".").collect::<Vec<&str>>();
+                let index = split[0];
+                let index = index.parse::<usize>().unwrap();
+                let delay = if index == 1000 { 0.0 } else { ns_delay[index] };
+                let delay = time::Duration::from_millis((delay * 1000.0) as u64);
+                let server = split[1];
+                let dst_ip_str = if server == "edge" {
+                    "195.148.127.230"
+                } else {
+                    "34.118.22.129"
+                };
+                info!("Target domain name: {} ({}@{}), forwarding to {}, delay: {:?}",
+                    server_name, index, server, dst_ip_str, delay);
+                thread::sleep(delay);
                 let dst_ip: Ipv4Addr = dst_ip_str.parse().unwrap();
                 let dst = Ipv4Address::from_bytes(dst_ip.octets().as_slice());
                 let mut ethernet = EthernetFrame::new_checked(recv_buf_clone).unwrap();
