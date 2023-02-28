@@ -10,7 +10,8 @@ fn query(name: &str) {
     let mut suffix = b"\x00\x00\x01\x00\x01\x00\x00\x29\x05\xac\x00\x00\x00\x00\x00\x00".to_vec();
     for s in name.split(".") {
         let mut v = [[s.len() as u8].as_ref(), s.as_bytes()].concat();
-        query_data.append(v.as_mut());
+        query_data
+            .append(v.as_mut());
     }
     query_data.append(suffix.as_mut());
     println!("{:?}", name.find(".").unwrap() as u8);

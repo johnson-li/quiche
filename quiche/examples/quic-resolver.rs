@@ -154,7 +154,8 @@ fn main() {
                 };
                 let split = server_name.split(".").collect::<Vec<&str>>();
                 let index = split[0];
-                let delay = ns_delay[index.parse::<usize>().unwrap()];
+                let index = index.parse::<usize>().unwrap();
+                let delay = if index == 1000 { 0.0 } else { ns_delay[index] };
                 let delay = time::Duration::from_millis((delay * 1000.0) as u64);
                 let server = split[1];
                 let dst_ip_str = if server == "edge" {

@@ -68,11 +68,12 @@ fn main() {
 
     let cmd = &args.next().unwrap();
 
-    if args.len() != 0 {
-        println!("Usage: {}", cmd);
+    if args.len() != 1 {
+        println!("Usage: {} edge/server", cmd);
         println!("\nSee tools/apps/ for more complete implementations.");
         return;
     }
+    let deployment = &args.next().unwrap();
 
     // Setup the event loop.
     let poll = mio::Poll::new().unwrap();
@@ -116,7 +117,11 @@ fn main() {
     config.set_disable_active_migration(true);
     config.enable_early_data();
     // config.set_preferred_address(2130706433); // localhost
-    config.set_preferred_address(3281289190); // mobix.xuebing.me
+    if deployment == "edge" {
+        config.set_preferred_address(3281289190); // mobix.xuebing.me
+    } else {
+        config.set_preferred_address(578164353); // cloud.xuebing.me
+    }
 
     let h3_config = quiche::h3::Config::new().unwrap();
 
