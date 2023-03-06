@@ -116,11 +116,12 @@ fn main() {
     config.set_initial_max_streams_uni(100);
     config.set_disable_active_migration(true);
     config.enable_early_data();
-    // config.set_preferred_address(2130706433); // localhost
     if deployment == "edge" {
         config.set_preferred_address(3281289190); // mobix.xuebing.me
-    } else {
+    } else if deployment == "cloud" {
         config.set_preferred_address(578164353); // cloud.xuebing.me
+    } else {
+        config.set_preferred_address(2130706433); // localhost
     }
 
     let h3_config = quiche::h3::Config::new().unwrap();
