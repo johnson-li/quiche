@@ -32,6 +32,7 @@ use crate::Error;
 use crate::Result;
 
 use crate::crypto;
+use crate::Error::InvalidPacket;
 use crate::octets;
 use crate::rand;
 use crate::ranges;
@@ -255,11 +256,11 @@ pub struct Header<'a> {
 
     /// The packet number. It's only meaningful after the header protection is
     /// removed.
-    pub(crate) pkt_num: u64,
+    pub pkt_num: u64,
 
     /// The length of the packet number. It's only meaningful after the header
     /// protection is removed.
-    pub(crate) pkt_num_len: usize,
+    pub pkt_num_len: usize,
 
     /// The address verification token of the packet. Only present in `Initial`
     /// and `Retry` packets.
@@ -271,7 +272,7 @@ pub struct Header<'a> {
 
     /// The key phase bit of the packet. It's only meaningful after the header
     /// protection is removed.
-    pub(crate) key_phase: bool,
+    pub key_phase: bool,
 }
 
 impl<'a> Header<'a> {
@@ -298,6 +299,61 @@ impl<'a> Header<'a> {
     ) -> Result<Header<'a>> {
         let mut b = octets::OctetsMut::with_slice(buf);
         Header::from_bytes(&mut b, dcid_len)
+    }
+
+    /// Parses a QUIC packet header from the given buffer.
+    #[inline]
+    pub fn from_slice2<'b>(
+        buf: &'b mut [u8]
+    ) -> Result<Header<'a>> {
+        let mut b = octets::OctetsMut::with_slice(buf);
+        let first = b.get_u8()?;
+        if !Header::is_long(first) {
+            let dcid = b.get_bytes(1)?;
+            return Ok(Header {
+                ty: Type::Short,
+                version: 0,
+                dcid: dcid.to_vec().into(),
+                scid: ConnectionId::default(),
+                pkt_num: 0,
+                pkt_num_len: 0,
+                token: None,
+                versions: None,
+                key_phase: false,
+            });
+        }
+        let version = b.get_u32()?;
+        const TYPE_MASK: u8 = 0x30;
+        let ty = if version == 0 {
+            Type::VersionNegotiation
+        } else {
+            match (first & TYPE_MASK) >> 4 {
+                0x00 => Type::Initial,
+                0x01 => Type::ZeroRTT,
+                0x02 => Type::Handshake,
+                0x03 => Type::Retry,
+                _ => {
+                    return Err(InvalidPacket)
+                }
+            }
+        };
+        let dcid_len = b.get_u8()?;
+        let dcid = b.get_bytes(dcid_len as usize)?.to_vec();
+        let scid_len = b.get_u8()?;
+        let scid = b.get_bytes(scid_len as usize)?.to_vec();
+        let token: Option<Vec<u8>> = None;
+        let versions: Option<Vec<u32>> = None;
+        Ok(Header {
+            ty,
+            version,
+            dcid: dcid.into(),
+            scid: scid.into(),
+            pkt_num: 0,
+            pkt_num_len: 0,
+            token,
+            versions,
+            key_phase: false,
+        })
     }
 
     pub(crate) fn from_bytes<'b>(
@@ -357,7 +413,7 @@ impl<'a> Header<'a> {
         match ty {
             Type::Initial => {
                 token = Some(b.get_bytes_with_varint_length()?.to_vec());
-            },
+            }
 
             Type::Retry => {
                 // Exclude the integrity tag from the token.
@@ -367,7 +423,7 @@ impl<'a> Header<'a> {
 
                 let token_len = b.cap() - aead::AES_128_GCM.tag_len();
                 token = Some(b.get_bytes(token_len)?.to_vec());
-            },
+            }
 
             Type::VersionNegotiation => {
                 let mut list: Vec<u32> = Vec::new();
@@ -378,7 +434,7 @@ impl<'a> Header<'a> {
                 }
 
                 versions = Some(list);
-            },
+            }
 
             _ => (),
         };
@@ -451,19 +507,19 @@ impl<'a> Header<'a> {
                     Some(ref v) => {
                         out.put_varint(v.len() as u64)?;
                         out.put_bytes(v)?;
-                    },
+                    }
 
                     // No token, so length = 0.
                     None => {
                         out.put_varint(0)?;
-                    },
+                    }
                 }
-            },
+            }
 
             Type::Retry => {
                 // Retry packets don't have a token length.
                 out.put_bytes(self.token.as_ref().unwrap())?;
-            },
+            }
 
             _ => (),
         }
@@ -474,7 +530,7 @@ impl<'a> Header<'a> {
     /// Returns true if the packet has a long header.
     ///
     /// The `b` parameter represents the first byte of the QUIC header.
-    fn is_long(b: u8) -> bool {
+    pub fn is_long(b: u8) -> bool {
         b & FORM_BIT != 0
     }
 }
@@ -747,7 +803,7 @@ pub fn verify_retry_integrity(
         &b.as_ref()[..aead::AES_128_GCM.tag_len()],
         tag.as_ref(),
     )
-    .map_err(|_| Error::CryptoFail)?;
+        .map_err(|_| Error::CryptoFail)?;
 
     Ok(())
 }
@@ -1007,7 +1063,7 @@ mod tests {
                 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba,
                 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba,
             ]
-            .into(),
+                .into(),
             scid: vec![0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb].into(),
             pkt_num: 0,
             pkt_num_len: 0,
@@ -1036,7 +1092,7 @@ mod tests {
                 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb,
                 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb,
             ]
-            .into(),
+                .into(),
             pkt_num: 0,
             pkt_num_len: 0,
             token: Some(vec![0x05, 0x06, 0x07, 0x08]),
@@ -1064,7 +1120,7 @@ mod tests {
                 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb,
                 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb,
             ]
-            .into(),
+                .into(),
             pkt_num: 0,
             pkt_num_len: 0,
             token: Some(vec![0x05, 0x06, 0x07, 0x08]),
@@ -1874,7 +1930,7 @@ mod tests {
             None,
             &aead,
         )
-        .unwrap();
+            .unwrap();
 
         assert_eq!(written, expected_pkt.len());
         assert_eq!(&out[..written], &expected_pkt[..]);
@@ -2775,7 +2831,7 @@ mod tests {
             None,
             &aead,
         )
-        .unwrap();
+            .unwrap();
 
         assert_eq!(written, expected_pkt.len());
         assert_eq!(&out[..written], &expected_pkt[..]);

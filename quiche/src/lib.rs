@@ -1959,6 +1959,7 @@ impl Connection {
 
         while payload.cap() > 0 {
             let frame = frame::Frame::from_bytes(&mut payload, hdr.ty)?;
+            println!("Receive frame: {:?}", frame);
             match frame {
                 frame::Frame::Crypto { data } => {
                     self.pkt_num_spaces[epoch].crypto_stream.recv.write(data)?;

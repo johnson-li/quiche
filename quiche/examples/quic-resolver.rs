@@ -34,7 +34,7 @@ fn dns_query(name: &str, socket: &UdpSocket) {
     let (_, _) = socket.recv_from(&mut recv_data).unwrap();
 }
 
-fn init_quic_config() -> Config {
+pub fn init_quic_config() -> Config {
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
     config.load_cert_chain_from_pem_file("cert.crt").unwrap();
     config.load_priv_key_from_pem_file("cert.key").unwrap();
