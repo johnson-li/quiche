@@ -47,20 +47,22 @@ fn main() {
 
     let cmd = &args.next().unwrap();
 
-    if args.len() != 1 {
-        println!("Usage: {} URL", cmd);
-        println!("\nSee tools/apps/ for more complete implementations.");
+    if args.len() != 2 {
+        println!("Usage: {} url server", cmd);
+        println!("\nHTTP3 Client.");
         return;
     }
 
     let url = url::Url::parse(&args.next().unwrap()).unwrap();
+    let server_ip = args.next().unwrap();
 
     // Setup the event loop.
     let poll = mio::Poll::new().unwrap();
     let mut events = mio::Events::with_capacity(1024);
 
     // Resolve server address.
-    let peer_addr = url.to_socket_addrs().unwrap().next().unwrap();
+    let peer_ip: std::net::IpAddr = server_ip.parse().expect("Unable to parse IP address");
+    let peer_addr = std::net::SocketAddr::new(peer_ip, 433);
 
     // Bind to INADDR_ANY or IN6ADDR_ANY depending on the IP family of the
     // server address. This is needed on macOS and BSD variants that don't
