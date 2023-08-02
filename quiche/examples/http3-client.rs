@@ -30,7 +30,6 @@ extern crate log;
 use std::net::Ipv4Addr;
 
 use ring::rand::*;
-use std::net::ToSocketAddrs;
 use env_logger::Builder;
 use log::LevelFilter;
 
@@ -55,6 +54,7 @@ fn main() {
 
     let url = url::Url::parse(&args.next().unwrap()).unwrap();
     let server_ip = args.next().unwrap();
+    let exit_after_handshake = true;
 
     // Setup the event loop.
     let poll = mio::Poll::new().unwrap();
@@ -62,7 +62,7 @@ fn main() {
 
     // Resolve server address.
     let peer_ip: std::net::IpAddr = server_ip.parse().expect("Unable to parse IP address");
-    let peer_addr = std::net::SocketAddr::new(peer_ip, 433);
+    let peer_addr = std::net::SocketAddr::new(peer_ip, 443);
 
     // Bind to INADDR_ANY or IN6ADDR_ANY depending on the IP family of the
     // server address. This is needed on macOS and BSD variants that don't
@@ -75,7 +75,6 @@ fn main() {
     // Create the UDP socket backing the QUIC connection, and register it with
     // the event loop.
     let socket = std::net::UdpSocket::bind(bind_addr).unwrap();
-
     let socket = mio::net::UdpSocket::from_socket(socket).unwrap();
     poll.register(
         &socket,
@@ -126,10 +125,10 @@ fn main() {
         scid.len(),
     );
 
-    let start_ts = std::time::Instant::now();
+    let start_ts: std::time::Instant = std::time::Instant::now();
     let (write, send_info) = conn.send(&mut out).expect("initial send failed");
 
-    info!("Send {} bytes to {:?}", out.len(), &send_info.to);
+    info!("[{:?}] Send {} bytes to {:?}", start_ts.elapsed(), write, &send_info.to);
     while let Err(e) = socket.send_to(&out[..write], &send_info.to) {
         if e.kind() == std::io::ErrorKind::WouldBlock {
             debug!("send() would block");
@@ -193,7 +192,7 @@ fn main() {
                     panic!("recv() failed: {:?}", e);
                 },
             };
-            info!("Recv {} bytes from {:?}", len, &from);
+            info!("[{:?}] Recv {} bytes from {:?}", start_ts.elapsed(), len, &from);
 
             let recv_info = quiche::RecvInfo { from };
 
@@ -235,12 +234,16 @@ fn main() {
                 "[{}] handshake completed in {:?}",
                 url, start_ts.elapsed()
             );
+            if exit_after_handshake {
+                info!("exit after handshake");
+                break;
+            }
             let server = Ipv4Addr::from(conn.get_preferred_address());
             info!(
                 "migrate server to {}",
                 server
             );
-            conn.peer_addr = format!("{}:4433", server).parse().expect("Fail to convert IP from str");
+            conn.peer_addr = format!("{}:443", server).parse().expect("Fail to convert IP from str");
             http3_conn = Some(
                 quiche::h3::Connection::with_transport(&mut conn, &h3_config)
                     .unwrap(),
@@ -341,7 +344,7 @@ fn main() {
                 },
             };
 
-            info!("Send {} bytes to {:?}", out.len(), &send_info.to);
+            info!("[{:?}] Send {} bytes to {:?}", start_ts.elapsed(), write, &send_info.to);
             if let Err(e) = socket.send_to(&out[..write], &send_info.to) {
                 if e.kind() == std::io::ErrorKind::WouldBlock {
                     debug!("send() would block");

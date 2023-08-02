@@ -2,7 +2,7 @@
 extern crate log;
 
 use std::borrow::Borrow;
-use serde_json::{Value};
+use serde_json::Value;
 use std::mem;
 use std::{thread, time};
 use std::fs::File;
@@ -12,8 +12,6 @@ use smoltcp::wire::{EthernetFrame, IpAddress, Ipv4Address, Ipv4Packet, UdpPacket
 use env_logger::Builder;
 use log::LevelFilter;
 use smoltcp::wire::IpProtocol::Udp;
-use std::net::UdpSocket;
-use std::ops::Deref;
 use libc::{socket, PF_PACKET, SOCK_RAW, recvfrom, c_void, sockaddr_ll, sockaddr, socklen_t, sendto, setsockopt, SOL_SOCKET, SO_BINDTODEVICE};
 use quiche::Config;
 
@@ -21,18 +19,18 @@ use quiche::Config;
 const MAX_DATAGRAM_SIZE: usize = 1350;
 const ETH_TYPE: u16 = 0x0800;
 
-fn dns_query(name: &str, socket: &UdpSocket) {
-    let mut query_data: Vec<u8> = b"\xdc\x5b\x01\x00\x00\x01\x00\x00\x00\x00\x00\x01".to_vec();
-    let mut suffix = b"\x00\x00\x01\x00\x01\x00\x00\x29\x05\xac\x00\x00\x00\x00\x00\x00".to_vec();
-    for s in name.split(".") {
-        let mut v = [[s.len() as u8].as_ref(), s.as_bytes()].concat();
-        query_data.append(v.as_mut());
-    }
-    query_data.append(suffix.as_mut());
-    socket.send(query_data.deref()).expect("couldn't send message");
-    let mut recv_data = [0; 10240];
-    let (_, _) = socket.recv_from(&mut recv_data).unwrap();
-}
+// fn dns_query(name: &str, socket: &UdpSocket) {
+//     let mut query_data: Vec<u8> = b"\xdc\x5b\x01\x00\x00\x01\x00\x00\x00\x00\x00\x01".to_vec();
+//     let mut suffix = b"\x00\x00\x01\x00\x01\x00\x00\x29\x05\xac\x00\x00\x00\x00\x00\x00".to_vec();
+//     for s in name.split(".") {
+//         let mut v = [[s.len() as u8].as_ref(), s.as_bytes()].concat();
+//         query_data.append(v.as_mut());
+//     }
+//     query_data.append(suffix.as_mut());
+//     socket.send(query_data.deref()).expect("couldn't send message");
+//     let mut recv_data = [0; 10240];
+//     let (_, _) = socket.recv_from(&mut recv_data).unwrap();
+// }
 
 pub fn init_quic_config() -> Config {
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();

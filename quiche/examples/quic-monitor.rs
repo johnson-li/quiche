@@ -2,13 +2,13 @@ use std::collections::HashMap;
 use pcap::{Device, Capture};
 use argparse::{ArgumentParser, Store};
 use smoltcp::wire::{EthernetFrame, Ipv4Packet, UdpPacket};
-use quiche::{Config, ConnectionId, Header};
+use quiche::{Config, Header};
 use std::thread;
 use std::net::{TcpStream, TcpListener, SocketAddr, IpAddr, Ipv4Addr};
 use std::io::{Read, Write};
 use std::sync::Arc;
 use chashmap::CHashMap;
-use quiche::Type::{Handshake, Initial, Short};
+use quiche::Type::{Initial, Short};
 
 
 fn handle_connection(mut stream: TcpStream) {
@@ -83,7 +83,7 @@ fn quic_monitor(map: Arc<CHashMap<ConnectionKey, u8>>) {
         println!("NIC not found: {}", nic);
         return;
     }
-    println!("Capturing {nic}");
+    println!("Capturing {}", nic);
     let dev = dev_list.pop().unwrap();
     let mut cap = Capture::from_device(dev).unwrap()
         .promisc(true)

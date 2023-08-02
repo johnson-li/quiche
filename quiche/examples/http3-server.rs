@@ -80,7 +80,7 @@ fn main() {
     let mut events = mio::Events::with_capacity(1024);
 
     // Create the UDP listening socket, and register it with the event loop.
-    let socket = net::UdpSocket::bind("0.0.0.0:4433").unwrap();
+    let socket = net::UdpSocket::bind("0.0.0.0:433").unwrap();
 
     let socket = mio::net::UdpSocket::from_socket(socket).unwrap();
     poll.register(
