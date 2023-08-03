@@ -61,6 +61,7 @@ fn main() {
     let domain = url.domain().unwrap();
     if server_ip.is_empty() {
         let dns_socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        dns_socket.connect("195.148.127.234:8054").unwrap();
         let mut builder = dns_parser::Builder::new_query(0, false);
         builder.add_question(domain, false, dns_parser::QueryType::A, dns_parser::QueryClass::IN);
         let query = builder.build().unwrap();
