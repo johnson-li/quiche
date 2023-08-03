@@ -32,6 +32,7 @@ use std::net::Ipv4Addr;
 use ring::rand::*;
 use env_logger::Builder;
 use log::LevelFilter;
+use dns_parser::rdata::a::Record;
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
 
@@ -46,14 +47,42 @@ fn main() {
 
     let cmd = &args.next().unwrap();
 
-    if args.len() != 2 {
-        println!("Usage: {} url server", cmd);
+    if args.len() < 1 {
+        println!("Usage: {} url [server]", cmd);
         println!("\nHTTP3 Client.");
         return;
     }
 
     let url = url::Url::parse(&args.next().unwrap()).unwrap();
-    let server_ip = args.next().unwrap();
+    let mut server_ip = match args.len() {
+        2 => args.next().unwrap(),
+        _ => "".to_string(),
+    };
+    let domain = url.domain().unwrap();
+    if server_ip.is_empty() {
+        let dns_socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        let mut builder = dns_parser::Builder::new_query(0, false);
+        builder.add_question(domain, false, dns_parser::QueryType::A, dns_parser::QueryClass::IN);
+        let query = builder.build().unwrap();
+        dns_socket.send(&query).unwrap();
+        let buf = &mut [0; MAX_DATAGRAM_SIZE];
+        let len = dns_socket.recv(buf).unwrap();
+        let data = buf[..len].to_vec();
+        let response = dns_parser::Packet::parse(&data).unwrap();
+        for answer in response.answers {
+            match answer.data {
+                dns_parser::RData::A(Record(ip)) => {
+                    server_ip = ip.to_string();
+                },
+                _ => { }
+            }
+        }
+        info!("Resolved {} to {}", domain, server_ip);
+    }
+    if server_ip.is_empty() {
+        error!("Unable to resolve {}", domain);
+        return;
+    }
     let exit_after_handshake = true;
 
     // Setup the event loop.
@@ -64,17 +93,9 @@ fn main() {
     let peer_ip: std::net::IpAddr = server_ip.parse().expect("Unable to parse IP address");
     let peer_addr = std::net::SocketAddr::new(peer_ip, 443);
 
-    // Bind to INADDR_ANY or IN6ADDR_ANY depending on the IP family of the
-    // server address. This is needed on macOS and BSD variants that don't
-    // support binding to IN6ADDR_ANY for both v4 and v6.
-    let bind_addr = match peer_addr {
-        std::net::SocketAddr::V4(_) => "0.0.0.0:0",
-        std::net::SocketAddr::V6(_) => "[::]:0",
-    };
-
     // Create the UDP socket backing the QUIC connection, and register it with
     // the event loop.
-    let socket = std::net::UdpSocket::bind(bind_addr).unwrap();
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
     let socket = mio::net::UdpSocket::from_socket(socket).unwrap();
     poll.register(
         &socket,

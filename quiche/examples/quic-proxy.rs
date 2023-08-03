@@ -81,7 +81,7 @@ fn udp_server() -> Result<(), Box<dyn Error>> {
     let mut connection_records: ConnectionMap = HashMap::new();
     let mut resolution_records: NameResolutionMap = HashMap::new();
     let mut recv_buf: [u8; MAX_DATAGRAM_SIZE] = [0; MAX_DATAGRAM_SIZE];
-    let mut client_addr = None;
+    let mut client_addr: Option<IpAddr> = None;
 
     loop {
         // Step 1, read from the client
@@ -89,6 +89,7 @@ fn udp_server() -> Result<(), Box<dyn Error>> {
             Ok((len, addr)) => {
                 let data = recv_buf[..len].to_vec();
                 if client_addr.is_none() {
+                    info!("Update client address: {}", addr.ip());
                     client_addr = Some(addr.ip());
                 }
                 let server_socket: Option<&UdpSocket> = connection_records.get(&addr.port());
