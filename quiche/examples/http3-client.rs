@@ -1,16 +1,67 @@
 #[macro_use]
 extern crate log;
 
-use std::{net::Ipv4Addr, time::Instant};
+use std::{net::Ipv4Addr, time::Instant, collections::HashMap};
 
 use ring::rand::*;
 use env_logger::Builder;
 use log::LevelFilter;
 use dns_parser::rdata::a::Record;
+use serde::{Deserialize, Serialize};
+
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct DNSCacheItem {
+    ttl: u32,
+    ip: String,
+    ts: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct DNSCache {
+    cache: HashMap<String, DNSCacheItem>,
+}
+
+fn load_dns_cache() -> DNSCache {
+    let cache_str = match std::fs::read_to_string("/tmp/dns_cache.json") {
+        Ok(cache) => cache,
+        Err(_) => String::new(),
+    };
+    let cache = serde_json::from_str(&cache_str)
+        .unwrap_or(DNSCache {cache: HashMap::new()});
+    cache
+}
+
+fn save_dns_cache(cache: DNSCache) {
+    let cache_str = serde_json::to_string(&cache).unwrap();
+    std::fs::write("/tmp/dns_cache.json", cache_str).unwrap();
+}
+
+fn get_current_ts() -> u64 {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    ts
+}
+
+fn name_resolution_from_cache(cache: &DNSCache, name: &String) -> Option<String> {
+    let record = cache.cache.get(name)?;
+    let ts = get_current_ts();
+    if ts <= record.ts + record.ttl as u64 {
+        info!("Use cached IP {} for {}, valid for {} s", 
+            record.ip, name, record.ts + record.ttl as u64 - ts);
+        return Some(record.ip.clone());
+    }
+    None
+}
+
 fn main() {
+    let mut dns_cache = load_dns_cache();
     Builder::new()
         .filter(None, LevelFilter::Info)
         .init();
@@ -34,6 +85,13 @@ fn main() {
     };
     let domain = url.domain().unwrap();
     if server_ip.is_empty() {
+        server_ip = match name_resolution_from_cache(&dns_cache, &domain.to_string()) {
+            Some(ip) => ip,
+            None => server_ip,
+        };
+    }
+    let mut dns_record : Option<DNSCacheItem> = None;
+    if server_ip.is_empty() {
         let ts = Instant::now();
         let dns_socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
         dns_socket.connect("195.148.127.234:8054").unwrap();
@@ -49,6 +107,11 @@ fn main() {
             match answer.data {
                 dns_parser::RData::A(Record(ip)) => {
                     server_ip = ip.to_string();
+                    dns_record = Some(DNSCacheItem {
+                        ttl: answer.ttl,
+                        ip: server_ip.clone(),
+                        ts: get_current_ts(),
+                    });
                     break;
                 },
                 _ => { }
@@ -357,6 +420,10 @@ fn main() {
             info!("connection closed, {:?}", conn.stats());
             break;
         }
+    }
+    if let Some(dns_record) = dns_record {
+        dns_cache.cache.insert(domain.to_string(), dns_record);
+        save_dns_cache(dns_cache);
     }
 }
 
