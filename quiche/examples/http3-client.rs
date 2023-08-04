@@ -1,33 +1,7 @@
-// Copyright (C) 2019, Cloudflare, Inc.
-// All rights reserved.
-//
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are
-// met:
-//
-//     * Redistributions of source code must retain the above copyright notice,
-//       this list of conditions and the following disclaimer.
-//
-//     * Redistributions in binary form must reproduce the above copyright
-//       notice, this list of conditions and the following disclaimer in the
-//       documentation and/or other materials provided with the distribution.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
-// IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
-// THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
-// PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
-// CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
-// EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
-// PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
-// PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
-// LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
-// NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-// SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
 #[macro_use]
 extern crate log;
 
-use std::net::Ipv4Addr;
+use std::{net::Ipv4Addr, time::Instant};
 
 use ring::rand::*;
 use env_logger::Builder;
@@ -54,12 +28,13 @@ fn main() {
     }
 
     let url = url::Url::parse(&args.next().unwrap()).unwrap();
-    let mut server_ip = match args.len() {
-        2 => args.next().unwrap(),
-        _ => "".to_string(),
+    let mut server_ip = match args.next() {
+        Some(ip) => ip,
+        None => String::new(),
     };
     let domain = url.domain().unwrap();
     if server_ip.is_empty() {
+        let ts = Instant::now();
         let dns_socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
         dns_socket.connect("195.148.127.234:8054").unwrap();
         let mut builder = dns_parser::Builder::new_query(0, false);
@@ -74,11 +49,12 @@ fn main() {
             match answer.data {
                 dns_parser::RData::A(Record(ip)) => {
                     server_ip = ip.to_string();
+                    break;
                 },
                 _ => { }
             }
         }
-        info!("Resolved {} to {}", domain, server_ip);
+        info!("It takes {:?} to resolve {} to {}", ts.elapsed(), domain, server_ip);
     }
     if server_ip.is_empty() {
         error!("Unable to resolve {}", domain);
