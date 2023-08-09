@@ -88,7 +88,7 @@ fn udp_server() -> Result<(), Box<dyn Error>> {
         match client_socket.recv_from(&mut recv_buf) {
             Ok((len, addr)) => {
                 let data = recv_buf[..len].to_vec();
-                if client_addr.is_none() {
+                if client_addr.is_none() || client_addr.unwrap() != addr.ip() {
                     info!("Update client address: {}", addr.ip());
                     client_addr = Some(addr.ip());
                 }
