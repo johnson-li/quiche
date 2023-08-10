@@ -80,6 +80,7 @@ fn udp_server() -> Result<(), Box<dyn Error>> {
 
     let mut connection_records: ConnectionMap = HashMap::new();
     let mut resolution_records: NameResolutionMap = HashMap::new();
+    let mut port_map: HashMap<u16, u16> = HashMap::new();  // server port -> client port
     let mut recv_buf: [u8; MAX_DATAGRAM_SIZE] = [0; MAX_DATAGRAM_SIZE];
     let mut client_addr: Option<IpAddr> = None;
 
@@ -138,9 +139,10 @@ fn udp_server() -> Result<(), Box<dyn Error>> {
                             match resolution_records.remove(&name) {
                                 Some(list) => {
                                     for (port, data) in list {
-                                        let server_socket = UdpSocket::bind(format!("0.0.0.0:{}", port))?;
+                                        let server_socket = UdpSocket::bind("0.0.0.0:0")?;
                                         server_socket.set_nonblocking(true)?;
                                         server_socket.connect(target)?;
+                                        port_map.insert(server_socket.local_addr()?.port(), port);
                                         server_socket.send(&data)?;
                                         connection_records.insert(port, server_socket);
                                     }
