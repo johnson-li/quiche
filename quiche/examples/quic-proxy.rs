@@ -31,7 +31,7 @@ pub fn init_quic_config() -> Config {
     config
 }
 
-fn parse_server_name(from: SocketAddr, data: &Vec<u8>) -> Option<String> {
+fn parse_server_name(from: SocketAddr, data: &Vec<u8>, config: &mut Config) -> Option<String> {
     let mut payload = data.clone();
     let hdr: quiche::Header<'_> = match quiche::Header::from_slice(&mut payload, quiche::MAX_CONN_ID_LEN) {
         Ok(v) => v,
@@ -40,9 +40,8 @@ fn parse_server_name(from: SocketAddr, data: &Vec<u8>) -> Option<String> {
             return None;
         }
     };
-    let mut config: Config = init_quic_config();
     let scid = hdr.scid.clone();
-    let mut conn = match quiche::accept(&scid, None, from, &mut config) {
+    let mut conn = match quiche::accept(&scid, None, from, config) {
         Ok(v) => v,
         Err(_) => {
             error!("Failed to accept connection");
@@ -83,6 +82,7 @@ fn udp_server() -> Result<(), Box<dyn Error>> {
     let mut port_map: HashMap<u16, u16> = HashMap::new();  // server port -> client port
     let mut recv_buf: [u8; MAX_DATAGRAM_SIZE] = [0; MAX_DATAGRAM_SIZE];
     let mut client_addr: Option<IpAddr> = None;
+    let mut config: Config = init_quic_config();
 
     loop {
         // Step 1, read from the client
@@ -99,7 +99,7 @@ fn udp_server() -> Result<(), Box<dyn Error>> {
                     server_socket.unwrap().send(&data).unwrap();
                 } else {
                     // Perform DNS resolution for initial packets
-                    match parse_server_name(addr, &data) {
+                    match parse_server_name(addr, &data, &mut config) {
                         Some(name) => {
                             dns_query(&name, &dns_socket);
                             if !resolution_records.contains_key(&name) {
