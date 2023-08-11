@@ -27,10 +27,10 @@ fn udp_server() -> Result<(), Box<dyn Error>> {
                 let mut server_ip: [u8; 4] = [0; 4];
                 server_ip.copy_from_slice(&recv_buf[..4]);
                 let server_addr = IpAddr::V4(server_ip.into());
-                let quic_payload = &recv_buf[4..];
+                let quic_payload = &recv_buf[4..len];
                 match connection_records.get(&port) {
                     Some(socket) => {
-                        socket.send(&recv_buf[..len])?;
+                        socket.send(quic_payload)?;
                     }
                     None => {
                         let server_socket = UdpSocket::bind("0.0.0.0:0")?;
