@@ -189,8 +189,8 @@ fn main() {
     );
 
     let (mut write, send_info) = if ip_proxy.is_some() {
-        let ip: Ipv4Addr = server_ip.unwrap().parse().unwrap();
-        out.copy_from_slice(ip.octets().as_ref());
+        let ip: Ipv4Addr = server_ip.clone().unwrap().parse().unwrap();
+        out[..4].copy_from_slice(ip.octets().as_ref());
         conn.send(&mut out[4..]).expect("initial send failed")
     } else {
         conn.send(&mut out).expect("initial send failed")
@@ -370,7 +370,13 @@ fn main() {
         // Generate outgoing QUIC packets and send them on the UDP socket, until
         // quiche reports that there are no more packets to be sent.
         loop {
-            let (write, send_info) = match conn.send(&mut out) {
+            let mut buf: &mut[u8] = out.as_mut();
+            if ip_proxy.is_some() {
+                let ip: Ipv4Addr = server_ip.clone().unwrap().parse().unwrap();
+                out[..4].copy_from_slice(ip.octets().as_ref());
+                buf = out[4..].as_mut();
+            }
+            let (mut write, send_info) = match conn.send(buf) {
                 Ok(v) => v,
                 Err(quiche::Error::Done) => {
                     debug!("done writing");
@@ -382,7 +388,9 @@ fn main() {
                     break;
                 },
             };
-
+            if ip_proxy.is_some() {
+                write += 4;
+            }
             info!("[{:?}] Send {} bytes to {:?}", start_ts.elapsed(), write, &send_info.to);
             if let Err(e) = socket.send_to(&out[..write], &send_info.to) {
                 if e.kind() == std::io::ErrorKind::WouldBlock {
