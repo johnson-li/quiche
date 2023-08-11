@@ -1,8 +1,10 @@
 #[macro_use]
 extern crate log;
+extern crate clap;
 
-use std::{net::Ipv4Addr, time::Instant, collections::HashMap};
-
+use clap::Parser;
+use url::Url;
+use std::{net::{Ipv4Addr, SocketAddr}, time::Instant, collections::HashMap};
 use ring::rand::*;
 use env_logger::Builder;
 use log::LevelFilter;
@@ -60,7 +62,20 @@ fn name_resolution_from_cache(cache: &DNSCache, name: &String) -> Option<String>
     None
 }
 
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct MyArgs {
+    #[arg(short, long)]
+    ip_proxy: Option<String>,
+    #[arg(short, long)]
+    url: String,
+    #[arg(short, long)]
+    aeacus_proxy: Option<String>,
+}
+
 fn main() {
+    let args = MyArgs::parse();
+    info!("args: {:?}", args);
     let mut dns_cache = load_dns_cache();
     Builder::new()
         .filter(None, LevelFilter::Info)
@@ -68,60 +83,66 @@ fn main() {
     let mut buf = [0; 65535];
     let mut out = [0; MAX_DATAGRAM_SIZE];
 
-    let mut args = std::env::args();
-
-    let cmd = &args.next().unwrap();
-
-    if args.len() < 1 {
-        println!("Usage: {} url [server]", cmd);
-        println!("\nHTTP3 Client.");
-        return;
-    }
-
-    let url = url::Url::parse(&args.next().unwrap()).unwrap();
-    let mut server_ip = match args.next() {
-        Some(ip) => ip,
-        None => String::new(),
-    };
+    let url = Url::parse(args.url.as_str()).unwrap();
+    let aeacus_proxy = args.aeacus_proxy;
+    let ip_proxy = args.ip_proxy;
     let domain = url.domain().unwrap();
-    if server_ip.is_empty() {
-        server_ip = match name_resolution_from_cache(&dns_cache, &domain.to_string()) {
-            Some(ip) => ip,
-            None => server_ip,
-        };
-    }
     let mut dns_record : Option<DNSCacheItem> = None;
-    if server_ip.is_empty() {
-        let ts = Instant::now();
-        let dns_socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
-        dns_socket.connect("195.148.127.234:8054").unwrap();
-        let mut builder = dns_parser::Builder::new_query(0, false);
-        builder.add_question(domain, false, dns_parser::QueryType::A, dns_parser::QueryClass::IN);
-        let query = builder.build().unwrap();
-        dns_socket.send(&query).unwrap();
-        let buf = &mut [0; MAX_DATAGRAM_SIZE];
-        let len = dns_socket.recv(buf).unwrap();
-        let data = buf[..len].to_vec();
-        let response = dns_parser::Packet::parse(&data).unwrap();
-        for answer in response.answers {
-            match answer.data {
-                dns_parser::RData::A(Record(ip)) => {
-                    server_ip = ip.to_string();
-                    dns_record = Some(DNSCacheItem {
-                        ttl: answer.ttl,
-                        ip: server_ip.clone(),
-                        ts: get_current_ts(),
-                    });
-                    break;
-                },
-                _ => { }
+    let start_ts = Instant::now();
+
+    // Create the configuration for the QUIC connection.
+    let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+    config.verify_peer(false);
+    config
+        .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
+        .unwrap();
+    config.set_max_idle_timeout(5000);
+    config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
+    config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
+    config.set_initial_max_data(10_000_000);
+    config.set_initial_max_stream_data_bidi_local(1_000_000);
+    config.set_initial_max_stream_data_bidi_remote(1_000_000);
+    config.set_initial_max_stream_data_uni(1_000_000);
+    config.set_initial_max_streams_bidi(100);
+    config.set_initial_max_streams_uni(100);
+    config.set_disable_active_migration(true);
+
+    // If Aeacus proxy is in use, there is no need to perform name resolution
+    // Resolve the domain name if Aeacus proxy is not in use
+    let mut server_ip = None;
+    if aeacus_proxy.is_none() {
+        server_ip =  name_resolution_from_cache(&dns_cache, &domain.to_string());
+        if server_ip.is_none() {
+            let dns_socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+            dns_socket.connect("195.148.127.234:8054").unwrap();
+            let mut builder = dns_parser::Builder::new_query(0, false);
+            builder.add_question(domain, false, dns_parser::QueryType::A, dns_parser::QueryClass::IN);
+            let query = builder.build().unwrap();
+            dns_socket.send(&query).unwrap();
+            let buf = &mut [0; MAX_DATAGRAM_SIZE];
+            let len = dns_socket.recv(buf).unwrap();
+            let data = buf[..len].to_vec();
+            let response = dns_parser::Packet::parse(&data).unwrap();
+            for answer in response.answers {
+                match answer.data {
+                    dns_parser::RData::A(Record(ip)) => {
+                        server_ip = Some(ip.to_string());
+                        dns_record = Some(DNSCacheItem {
+                            ttl: answer.ttl,
+                            ip: server_ip.clone().unwrap(),
+                            ts: get_current_ts(),
+                        });
+                        break;
+                    },
+                    _ => { }
+                }
             }
+            info!("It takes {:?} to resolve {} to {}", start_ts.elapsed(), domain, server_ip.clone().unwrap());
         }
-        info!("It takes {:?} to resolve {} to {}", ts.elapsed(), domain, server_ip);
-    }
-    if server_ip.is_empty() {
-        error!("Unable to resolve {}", domain);
-        return;
+        if server_ip.is_none() {
+            error!("Unable to resolve {}", domain);
+            return;
+        }
     }
     let exit_after_handshake = true;
 
@@ -129,9 +150,17 @@ fn main() {
     let poll = mio::Poll::new().unwrap();
     let mut events = mio::Events::with_capacity(1024);
 
-    // Resolve server address.
-    let peer_ip: std::net::IpAddr = server_ip.parse().expect("Unable to parse IP address");
-    let peer_addr = std::net::SocketAddr::new(peer_ip, 443);
+    // Remote peer is 
+    // 1. quic-proxy if aeacus proxy specified
+    // 2. ip-proxy if ip proxy specified
+    // 3. server otherwise
+    let peer_addr = if ip_proxy.is_some() {
+        SocketAddr::new(ip_proxy.clone().unwrap().parse().unwrap(), 8443)
+    } else if aeacus_proxy.is_some() {
+        SocketAddr::new(aeacus_proxy.unwrap().parse().unwrap(), 443)
+    } else {
+        SocketAddr::new(server_ip.clone().unwrap().parse().unwrap(), 443)
+    };
 
     // Create the UDP socket backing the QUIC connection, and register it with
     // the event loop.
@@ -145,39 +174,12 @@ fn main() {
     )
     .unwrap();
 
-    // Create the configuration for the QUIC connection.
-    let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
-
-    // *CAUTION*: this should not be set to `false` in production!!!
-    config.verify_peer(false);
-
-    config
-        .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
-        .unwrap();
-
-    config.set_max_idle_timeout(5000);
-    config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
-    config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
-    config.set_initial_max_data(10_000_000);
-    config.set_initial_max_stream_data_bidi_local(1_000_000);
-    config.set_initial_max_stream_data_bidi_remote(1_000_000);
-    config.set_initial_max_stream_data_uni(1_000_000);
-    config.set_initial_max_streams_bidi(100);
-    config.set_initial_max_streams_uni(100);
-    config.set_disable_active_migration(true);
-
     let mut http3_conn = None;
-
-    // Generate a random source connection ID for the connection.
     let mut scid = [0; quiche::MAX_CONN_ID_LEN];
     SystemRandom::new().fill(&mut scid[..]).unwrap();
-
     let scid = quiche::ConnectionId::from_ref(&scid);
-
-    // Create a QUIC connection and initiate handshake.
     let mut conn =
         quiche::connect(url.domain(), &scid, peer_addr, &mut config).unwrap();
-
     info!(
         "connecting to {:} from {:} with scid {} (len: {})",
         peer_addr,
@@ -186,29 +188,31 @@ fn main() {
         scid.len(),
     );
 
-    let start_ts: std::time::Instant = std::time::Instant::now();
-    let (write, send_info) = conn.send(&mut out).expect("initial send failed");
-
+    let (mut write, send_info) = if ip_proxy.is_some() {
+        let ip: Ipv4Addr = server_ip.unwrap().parse().unwrap();
+        out.copy_from_slice(ip.octets().as_ref());
+        conn.send(&mut out[4..]).expect("initial send failed")
+    } else {
+        conn.send(&mut out).expect("initial send failed")
+    };
+    if ip_proxy.is_some() {
+        write += 4;
+    }
     info!("[{:?}] Send {} bytes to {:?}", start_ts.elapsed(), write, &send_info.to);
     while let Err(e) = socket.send_to(&out[..write], &send_info.to) {
         if e.kind() == std::io::ErrorKind::WouldBlock {
             debug!("send() would block");
             continue;
         }
-
         panic!("send() failed: {:?}", e);
     }
 
     let h3_config = quiche::h3::Config::new().unwrap();
-
-    // Prepare request.
     let mut path = String::from(url.path());
-
     if let Some(query) = url.query() {
         path.push('?');
         path.push_str(query);
     }
-
     let req = vec![
         quiche::h3::Header::new(b":method", b"GET"),
         quiche::h3::Header::new(b":scheme", url.scheme().as_bytes()),
@@ -225,64 +229,44 @@ fn main() {
     loop {
         poll.poll(&mut events, conn.timeout()).unwrap();
 
-        // Read incoming UDP packets from the socket and feed them to quiche,
-        // until there are no more packets to read.
         'read: loop {
-            // If the event loop reported no events, it means that the timeout
-            // has expired, so handle it without attempting to read packets. We
-            // will then proceed with the send loop.
             if events.is_empty() {
                 debug!("timed out");
-
                 conn.on_timeout();
-
                 break 'read;
             }
 
             let (len, from) = match socket.recv_from(&mut buf) {
                 Ok(v) => v,
-
                 Err(e) => {
-                    // There are no more UDP packets to read, so end the read
-                    // loop.
                     if e.kind() == std::io::ErrorKind::WouldBlock {
                         debug!("recv() would block");
                         break 'read;
                     }
-
                     panic!("recv() failed: {:?}", e);
                 },
             };
             info!("[{:?}] Recv {} bytes from {:?}", start_ts.elapsed(), len, &from);
-
             let recv_info = quiche::RecvInfo { from };
-
-            // Process potentially coalesced packets.
             let _ = match conn.recv(&mut buf[..len], recv_info) {
                 Ok(v) => v,
-
                 Err(e) => {
                     error!("recv failed: {:?}", e);
                     continue 'read;
                 },
             };
-
             let hdr = match quiche::Header::from_slice(
                 buf.as_mut(),
                 quiche::MAX_CONN_ID_LEN,
             ) {
                 Ok(v) => v,
-
                 Err(e) => {
                     error!("Parsing packet header failed: {:?}", e);
                     continue 'read;
                 },
             };
-
             info!("got packet {:?}", hdr);
         }
-
-        debug!("done reading");
 
         if conn.is_closed() {
             info!("connection closed, {:?}", conn.stats());
@@ -324,7 +308,6 @@ fn main() {
         }
 
         if let Some(http3_conn) = &mut http3_conn {
-            // Process HTTP/3 events.
             loop {
                 match http3_conn.poll(&mut conn) {
                     Ok((stream_id, quiche::h3::Event::Headers { list, .. })) => {
@@ -354,7 +337,6 @@ fn main() {
                             "response received in {:?}, closing...",
                             start_ts.elapsed()
                         );
-
                         conn.close(true, 0x00, b"kthxbye").unwrap();
                     },
 
@@ -363,7 +345,6 @@ fn main() {
                             "request was reset by peer with {}, closing...",
                             e
                         );
-
                         conn.close(true, 0x00, b"kthxbye").unwrap();
                     },
 
@@ -391,15 +372,12 @@ fn main() {
         loop {
             let (write, send_info) = match conn.send(&mut out) {
                 Ok(v) => v,
-
                 Err(quiche::Error::Done) => {
                     debug!("done writing");
                     break;
                 },
-
                 Err(e) => {
                     error!("send failed: {:?}", e);
-
                     conn.close(false, 0x1, b"fail").ok();
                     break;
                 },
@@ -411,7 +389,6 @@ fn main() {
                     debug!("send() would block");
                     break;
                 }
-
                 panic!("send() failed: {:?}", e);
             }
         }

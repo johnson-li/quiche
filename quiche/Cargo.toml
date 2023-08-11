@@ -53,6 +53,7 @@ tokio = { version = "1.29.1", features = ["full"] }
 trust-dns-resolver = "0.22.0"
 dns-parser = "0.8.0"
 env_logger = "0.9.0"
+clap = { version = "4.3.21", features = ["derive"] }
 libc = "0.2"
 libm = "0.2"
 ring = "0.16"
