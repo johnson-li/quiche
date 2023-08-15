@@ -45,7 +45,7 @@ const KEY_PHASE_BIT: u8 = 0x04;
 const TYPE_MASK: u8 = 0x30;
 const PKT_NUM_MASK: u8 = 0x03;
 
-pub const MAX_CID_LEN: u8 = 16;
+pub const MAX_CID_LEN: u8 = 20;
 
 pub const MAX_PKT_NUM_LEN: usize = 4;
 
@@ -401,6 +401,8 @@ impl<'a> Header<'a> {
 
         let scid_len = b.get_u8()?;
         if crate::version_is_supported(version) && scid_len > MAX_CID_LEN {
+            info!("scid_len {} > MAX_CID_LEN {}", scid_len, MAX_CID_LEN);
+            info!("Version {} is supported: {}", version, crate::version_is_supported(version));
             return Err(Error::InvalidPacket);
         }
         let scid = b.get_bytes(scid_len as usize)?.to_vec();

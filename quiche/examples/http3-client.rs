@@ -161,7 +161,7 @@ fn main() {
             return;
         }
     }
-    let exit_after_handshake = true;
+    let exit_after_handshake = false;
 
     // Setup the event loop.
     let poll = mio::Poll::new().unwrap();
@@ -174,7 +174,7 @@ fn main() {
     let peer_addr = if ip_proxy.is_some() {
         SocketAddr::new(ip_proxy.clone().unwrap().parse().unwrap(), 8443)
     } else if aeacus_proxy.is_some() {
-        SocketAddr::new(aeacus_proxy.unwrap().parse().unwrap(), 443)
+        SocketAddr::new(aeacus_proxy.clone().unwrap().parse().unwrap(), 443)
     } else {
         SocketAddr::new(server_ip.clone().unwrap().parse().unwrap(), 443)
     };
@@ -199,24 +199,8 @@ fn main() {
         quiche::connect(url.domain(), &scid, peer_addr, &mut config).unwrap();
     if let Some(sessions) = &mut sessions {
         if let Some(session) = sessions.get_mut(domain) {
+            info!("Resuming session for {}", domain);
             conn.set_session(&session).unwrap();
-            // Send 0-RTT data
-            // if conn.is_in_early_data() {
-            //     info!("sending early data");
-            //     let req = vec![
-            //         quiche::h3::Header::new(b":method", b"GET"),
-            //         quiche::h3::Header::new(b":scheme", url.scheme().as_bytes()),
-            //         quiche::h3::Header::new(
-            //             b":authority",
-            //             url.host_str().unwrap().as_bytes(),
-            //         ),
-            //         quiche::h3::Header::new(b":path", url.path().as_bytes()),
-            //         quiche::h3::Header::new(b"user-agent", b"quiche"),
-            //     ];
-            //     let stream_id = conn.stream_create(true).unwrap();
-            //     conn.stream_send(stream_id, &bincode::serialize(&req).unwrap(), true).unwrap();
-            // }
-            info!("Early data: {:?}", conn.is_in_early_data());
         }
     }
     info!(
@@ -234,6 +218,26 @@ fn main() {
     } else {
         conn.send(&mut out).expect("initial send failed")
     };
+    let mut path = String::from(url.path());
+    let req = vec![
+        quiche::h3::Header::new(b":method", b"GET"),
+        quiche::h3::Header::new(b":scheme", url.scheme().as_bytes()),
+        quiche::h3::Header::new(
+            b":authority",
+            url.host_str().unwrap().as_bytes(),
+        ),
+        quiche::h3::Header::new(b":path", path.as_bytes()),
+        quiche::h3::Header::new(b"user-agent", b"quiche"),
+    ];
+
+    let mut req_sent = false;
+    info!("Early data: {:?}", conn.is_in_early_data());
+    if conn.is_in_early_data() && http3_conn.is_none() {
+        http3_conn = Some(
+            quiche::h3::Connection::with_transport(&mut conn, &quiche::h3::Config::new().unwrap())
+                .unwrap(),
+        );
+    }
     if ip_proxy.is_some() {
         write += 4;
     }
@@ -247,23 +251,10 @@ fn main() {
     }
 
     let h3_config = quiche::h3::Config::new().unwrap();
-    let mut path = String::from(url.path());
     if let Some(query) = url.query() {
         path.push('?');
         path.push_str(query);
     }
-    let req = vec![
-        quiche::h3::Header::new(b":method", b"GET"),
-        quiche::h3::Header::new(b":scheme", url.scheme().as_bytes()),
-        quiche::h3::Header::new(
-            b":authority",
-            url.host_str().unwrap().as_bytes(),
-        ),
-        quiche::h3::Header::new(b":path", path.as_bytes()),
-        quiche::h3::Header::new(b"user-agent", b"quiche"),
-    ];
-
-    let mut req_sent = false;
 
     loop {
         poll.poll(&mut events, conn.timeout()).unwrap();
@@ -309,31 +300,34 @@ fn main() {
 
         if conn.is_closed() {
             info!("connection closed, {:?}", conn.stats());
+            if let Some(sessions) = &mut sessions {
+                if let Some(session) = conn.session() {
+                    sessions.insert(domain.to_string(), session);
+                    let data = bincode::serialize(sessions).unwrap();
+                    std::fs::write(session_file, data).unwrap();
+                    info!("Save session to {}", session_file);
+                } else {
+                    info!("No session");
+                }
+            }
             break;
         }
 
         // Create a new HTTP/3 connection once the QUIC connection is established.
         if conn.is_established() && http3_conn.is_none() {
-            if let Some(sessions) = &mut sessions {
-                let session = conn.session().unwrap();
-                sessions.insert(domain.to_string(), session);
-                let data = bincode::serialize(sessions).unwrap();
-                std::fs::write(session_file, data).unwrap();
-            }
             info!(
                 "[{}] handshake completed in {:?}",
                 url, start_ts.elapsed()
             );
             if exit_after_handshake {
                 info!("exit after handshake");
-                break;
+                conn.close(false, 0x1, b"finish").ok();
             }
-            let server = Ipv4Addr::from(conn.get_preferred_address());
-            info!(
-                "migrate server to {}",
-                server
-            );
-            conn.peer_addr = format!("{}:443", server).parse().expect("Fail to convert IP from str");
+            if aeacus_proxy.is_some() {
+                let server = Ipv4Addr::from(conn.get_preferred_address());
+                info!("migrate server to {}", server);
+                conn.peer_addr = format!("{}:443", server).parse().expect("Fail to convert IP from str");
+            }
             http3_conn = Some(
                 quiche::h3::Connection::with_transport(&mut conn, &h3_config)
                     .unwrap(),
@@ -357,8 +351,8 @@ fn main() {
                 match http3_conn.poll(&mut conn) {
                     Ok((stream_id, quiche::h3::Event::Headers { list, .. })) => {
                         info!(
-                            "got response headers {:?} on stream id {}",
-                            list, stream_id
+                            "[{:?}] got response headers {:?} on stream id {}",
+                            start_ts.elapsed(), list[0], stream_id
                         );
                     },
 
@@ -448,6 +442,16 @@ fn main() {
 
         if conn.is_closed() {
             info!("connection closed, {:?}", conn.stats());
+            if let Some(sessions) = &mut sessions {
+                if let Some(session) = conn.session() {
+                    sessions.insert(domain.to_string(), session);
+                    let data = bincode::serialize(sessions).unwrap();
+                    std::fs::write(session_file, data).unwrap();
+                    info!("Save session to {}", session_file);
+                } else {
+                    info!("No session");
+                }
+            }
             break;
         }
     }
