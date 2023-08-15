@@ -71,6 +71,8 @@ struct MyArgs {
     url: String,
     #[arg(short, long)]
     aeacus_proxy: Option<String>,
+    #[arg(short, long)]
+    zero_rtt: bool,
 }
 
 fn main() {
@@ -86,6 +88,20 @@ fn main() {
     let url = Url::parse(args.url.as_str()).unwrap();
     let aeacus_proxy = args.aeacus_proxy;
     let ip_proxy = args.ip_proxy;
+    let zero_rtt = args.zero_rtt;
+    let session_file = "/tmp/http3-client-session.bin";
+    let mut sessions: Option<HashMap<String, Vec<u8>>> = if zero_rtt {
+        match std::fs::metadata(session_file) {
+            Ok(_) => {
+                let data = std::fs::read(session_file).unwrap();
+                let sessions: HashMap<String, Vec<u8>> = bincode::deserialize(&data).unwrap();
+                Some(sessions)
+            }
+            Err(_) => Some(HashMap::new()),
+        } 
+    } else {
+        None
+    };
     let domain = url.domain().unwrap();
     let mut dns_record : Option<DNSCacheItem> = None;
     let start_ts = Instant::now();
@@ -106,6 +122,7 @@ fn main() {
     config.set_initial_max_streams_bidi(100);
     config.set_initial_max_streams_uni(100);
     config.set_disable_active_migration(true);
+    config.enable_early_data();
 
     // If Aeacus proxy is in use, there is no need to perform name resolution
     // Resolve the domain name if Aeacus proxy is not in use
@@ -180,6 +197,28 @@ fn main() {
     let scid = quiche::ConnectionId::from_ref(&scid);
     let mut conn =
         quiche::connect(url.domain(), &scid, peer_addr, &mut config).unwrap();
+    if let Some(sessions) = &mut sessions {
+        if let Some(session) = sessions.get_mut(domain) {
+            conn.set_session(&session).unwrap();
+            // Send 0-RTT data
+            // if conn.is_in_early_data() {
+            //     info!("sending early data");
+            //     let req = vec![
+            //         quiche::h3::Header::new(b":method", b"GET"),
+            //         quiche::h3::Header::new(b":scheme", url.scheme().as_bytes()),
+            //         quiche::h3::Header::new(
+            //             b":authority",
+            //             url.host_str().unwrap().as_bytes(),
+            //         ),
+            //         quiche::h3::Header::new(b":path", url.path().as_bytes()),
+            //         quiche::h3::Header::new(b"user-agent", b"quiche"),
+            //     ];
+            //     let stream_id = conn.stream_create(true).unwrap();
+            //     conn.stream_send(stream_id, &bincode::serialize(&req).unwrap(), true).unwrap();
+            // }
+            info!("Early data: {:?}", conn.is_in_early_data());
+        }
+    }
     info!(
         "connecting to {:} from {:} with scid {} (len: {})",
         peer_addr,
@@ -275,6 +314,12 @@ fn main() {
 
         // Create a new HTTP/3 connection once the QUIC connection is established.
         if conn.is_established() && http3_conn.is_none() {
+            if let Some(sessions) = &mut sessions {
+                let session = conn.session().unwrap();
+                sessions.insert(domain.to_string(), session);
+                let data = bincode::serialize(sessions).unwrap();
+                std::fs::write(session_file, data).unwrap();
+            }
             info!(
                 "[{}] handshake completed in {:?}",
                 url, start_ts.elapsed()

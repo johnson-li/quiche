@@ -4,6 +4,7 @@ extern crate log;
 use std::collections::HashMap;
 use std::error::Error;
 use std::net::{SocketAddr, UdpSocket, IpAddr};
+use std::time::Instant;
 use dns_parser::RData;
 use env_logger::Builder;
 use log::LevelFilter;
@@ -59,7 +60,7 @@ fn parse_server_name(from: SocketAddr, data: &Vec<u8>, config: &mut Config) -> O
     conn.server_name().map(|name| name.to_string())
 }
 
-type ConnectionMap = HashMap<u16, UdpSocket>;
+type ConnectionMap = HashMap<u16, (UdpSocket, Instant)>;
 type NameResolutionMap = HashMap<String, Vec<(u16, Vec<u8>)>>;
 
 fn dns_query(name: &str, socket: &UdpSocket) {
@@ -83,6 +84,7 @@ fn udp_server() -> Result<(), Box<dyn Error>> {
     let mut recv_buf: [u8; MAX_DATAGRAM_SIZE] = [0; MAX_DATAGRAM_SIZE];
     let mut client_addr: Option<IpAddr> = None;
     let mut config: Config = init_quic_config();
+    let mut outdated_keys: Vec<u16> = Vec::new();
 
     loop {
         // Step 1, read from the client
@@ -93,10 +95,10 @@ fn udp_server() -> Result<(), Box<dyn Error>> {
                     info!("Update client address: {}", addr.ip());
                     client_addr = Some(addr.ip());
                 }
-                let server_socket: Option<&UdpSocket> = connection_records.get(&addr.port());
-                if server_socket.is_some() {
+                if let Some((server_socket, _ts)) = connection_records.get_mut(&addr.port()) {
                     // Forward non-initial packets directly to the server
-                    server_socket.unwrap().send(&data).unwrap();
+                    server_socket.send(&data).unwrap();
+                    continue;
                 } else {
                     // Perform DNS resolution for initial packets
                     match parse_server_name(addr, &data, &mut config) {
@@ -115,7 +117,7 @@ fn udp_server() -> Result<(), Box<dyn Error>> {
         }
 
         // Step 2, read from the servers
-        for (port, server_socket) in &connection_records {
+        for (port, (server_socket, ts)) in &connection_records {
             match server_socket.recv(&mut recv_buf) {
                 Ok(len) => {
                     let target: SocketAddr = SocketAddr::new(client_addr.unwrap(), *port);
@@ -123,7 +125,14 @@ fn udp_server() -> Result<(), Box<dyn Error>> {
                 },
                 _ => { }
             };
+            if ts.elapsed().as_millis() > 1000 {
+                outdated_keys.push(*port);
+            }
         }
+        for key in &outdated_keys {
+            connection_records.remove(&key);
+        }
+        outdated_keys.clear();
 
         // Step 3, read from the DNS resolver and forward the initial packets
         match dns_socket.recv(&mut recv_buf) {
@@ -144,7 +153,7 @@ fn udp_server() -> Result<(), Box<dyn Error>> {
                                         server_socket.connect(target)?;
                                         port_map.insert(server_socket.local_addr()?.port(), port);
                                         server_socket.send(&data)?;
-                                        connection_records.insert(port, server_socket);
+                                        connection_records.insert(port, (server_socket, Instant::now()));
                                     }
                                 },
                                 _ => { }
