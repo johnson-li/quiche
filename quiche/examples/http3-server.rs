@@ -27,9 +27,10 @@
 #[macro_use]
 extern crate log;
 
-use std::net;
+use std::net::{self, Ipv4Addr};
 
 use std::collections::HashMap;
+use std::str::FromStr;
 
 // use ring::rand::*;
 
@@ -65,22 +66,20 @@ fn main() {
     let mut out = [0; MAX_DATAGRAM_SIZE];
 
     let mut args = std::env::args();
-
     let cmd = &args.next().unwrap();
-
     if args.len() != 1 {
-        println!("Usage: {} edge/server", cmd);
-        println!("\nSee tools/apps/ for more complete implementations.");
+        info!("Usage: {} server_ip", cmd);
         return;
     }
-    let deployment = &args.next().unwrap();
+    let server_ip = &args.next().unwrap();
+    let server_ip = Ipv4Addr::from_str(&server_ip).unwrap();
 
     // Setup the event loop.
     let poll = mio::Poll::new().unwrap();
     let mut events = mio::Events::with_capacity(1024);
 
     // Create the UDP listening socket, and register it with the event loop.
-    let socket = net::UdpSocket::bind("0.0.0.0:433").unwrap();
+    let socket = net::UdpSocket::bind("0.0.0.0:443").unwrap();
 
     let socket = mio::net::UdpSocket::from_socket(socket).unwrap();
     poll.register(
@@ -116,13 +115,8 @@ fn main() {
     config.set_initial_max_streams_uni(100);
     config.set_disable_active_migration(true);
     config.enable_early_data();
-    if deployment == "edge" {
-        config.set_preferred_address(3281289190); // mobix.xuebing.me
-    } else if deployment == "cloud" {
-        config.set_preferred_address(578164353); // cloud.xuebing.me
-    } else {
-        config.set_preferred_address(2130706433); // localhost
-    }
+    let addr: u32 = server_ip.into();
+    config.set_preferred_address(addr.into());
 
     let h3_config = quiche::h3::Config::new().unwrap();
 

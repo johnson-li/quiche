@@ -37,7 +37,7 @@ pub fn init_quic_config() -> Config {
     config.load_cert_chain_from_pem_file("cert.crt").unwrap();
     config.load_priv_key_from_pem_file("cert.key").unwrap();
     config.set_application_protos(quiche::h3::APPLICATION_PROTOCOL).unwrap();
-    config.set_max_idle_timeout(5000);
+    config.set_max_idle_timeout(5000); 
     config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
     config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
     config.set_initial_max_data(10_000_000);
