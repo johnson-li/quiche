@@ -68,6 +68,8 @@ struct MyArgs {
     #[arg(short, long)]
     ip_proxy: Option<String>,
     #[arg(short, long)]
+    ldns: String,
+    #[arg(short, long)]
     url: String,
     #[arg(short, long)]
     aeacus_proxy: Option<String>,
@@ -89,6 +91,7 @@ fn main() {
     let aeacus_proxy = args.aeacus_proxy;
     let ip_proxy = args.ip_proxy;
     let zero_rtt = args.zero_rtt;
+    let ldns = args.ldns;
     let session_file = "/tmp/http3-client-session.bin";
     let mut sessions: Option<HashMap<String, Vec<u8>>> = if zero_rtt {
         match std::fs::metadata(session_file) {
@@ -131,7 +134,7 @@ fn main() {
         server_ip =  name_resolution_from_cache(&dns_cache, &domain.to_string());
         if server_ip.is_none() {
             let dns_socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
-            dns_socket.connect("195.148.127.234:8054").unwrap();
+            dns_socket.connect(ldns).unwrap();
             let mut builder = dns_parser::Builder::new_query(0, false);
             builder.add_question(domain, false, dns_parser::QueryType::A, dns_parser::QueryClass::IN);
             let query = builder.build().unwrap();
