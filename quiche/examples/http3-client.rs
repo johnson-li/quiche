@@ -68,7 +68,7 @@ struct MyArgs {
     #[arg(short, long)]
     ip_proxy: Option<String>,
     #[arg(short, long)]
-    ldns: String,
+    ldns: Option<String>,
     #[arg(short, long)]
     url: String,
     #[arg(short, long)]
@@ -134,7 +134,7 @@ fn main() {
         server_ip =  name_resolution_from_cache(&dns_cache, &domain.to_string());
         if server_ip.is_none() {
             let dns_socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
-            dns_socket.connect(ldns).unwrap();
+            dns_socket.connect(ldns.unwrap()).unwrap();
             let mut builder = dns_parser::Builder::new_query(0, false);
             builder.add_question(domain, false, dns_parser::QueryType::A, dns_parser::QueryClass::IN);
             let query = builder.build().unwrap();
