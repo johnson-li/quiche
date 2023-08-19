@@ -107,7 +107,6 @@ fn main() {
     };
     let domain = url.domain().unwrap();
     let mut dns_record : Option<DNSCacheItem> = None;
-    let start_ts = Instant::now();
 
     // Create the configuration for the QUIC connection.
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
@@ -127,6 +126,7 @@ fn main() {
     config.set_disable_active_migration(true);
     config.enable_early_data();
 
+    let start_ts = Instant::now();
     // If Aeacus proxy is in use, there is no need to perform name resolution
     // Resolve the domain name if Aeacus proxy is not in use
     let mut server_ip = None;
@@ -232,15 +232,6 @@ fn main() {
         quiche::h3::Header::new(b":path", path.as_bytes()),
         quiche::h3::Header::new(b"user-agent", b"quiche"),
     ];
-
-    let mut req_sent = false;
-    info!("Early data: {:?}", conn.is_in_early_data());
-    if conn.is_in_early_data() && http3_conn.is_none() {
-        http3_conn = Some(
-            quiche::h3::Connection::with_transport(&mut conn, &quiche::h3::Config::new().unwrap())
-                .unwrap(),
-        );
-    }
     if ip_proxy.is_some() {
         write += 4;
     }
@@ -251,6 +242,35 @@ fn main() {
             continue;
         }
         panic!("send() failed: {:?}", e);
+    }
+
+    let mut req_sent = false;
+    info!("[{:?}] Early data: {:?}", start_ts.elapsed(), conn.is_in_early_data());
+    if conn.is_in_early_data() && http3_conn.is_none() {
+        let mut h3_conn = quiche::h3::Connection::with_transport(&mut conn, &quiche::h3::Config::new().unwrap()).unwrap();
+        info!("[{:?}] Sending HTTP request", start_ts.elapsed());
+        h3_conn.send_request(&mut conn, &req, true).unwrap();
+        req_sent = true;
+        http3_conn = Some(h3_conn);
+        // Send 0-RTT data
+        let (mut write, send_info) = if ip_proxy.is_some() {
+            let ip: Ipv4Addr = server_ip.clone().unwrap().parse().unwrap();
+            out[..4].copy_from_slice(ip.octets().as_ref());
+            conn.send(&mut out[4..]).expect("0-RTT send failed")
+        } else {
+            conn.send(&mut out).expect("0-RTT send failed")
+        };
+        if ip_proxy.is_some() {
+            write += 4;
+        }
+        info!("[{:?}] Send {} bytes to {:?}", start_ts.elapsed(), write, &send_info.to);
+        while let Err(e) = socket.send_to(&out[..write], &send_info.to) {
+            if e.kind() == std::io::ErrorKind::WouldBlock {
+                debug!("send() would block");
+                continue;
+            }
+            panic!("send() failed: {:?}", e);
+        }
     }
 
     let h3_config = quiche::h3::Config::new().unwrap();
@@ -341,7 +361,7 @@ fn main() {
         // all requests have been sent.
         if let Some(h3_conn) = &mut http3_conn {
             if !req_sent {
-                info!("sending HTTP request {:?}", req);
+                info!("[{:?}] Sending HTTP request {:?}", start_ts.elapsed(), req);
 
                 h3_conn.send_request(&mut conn, &req, true).unwrap();
 
@@ -364,13 +384,12 @@ fn main() {
                             http3_conn.recv_body(&mut conn, stream_id, &mut buf)
                         {
                             info!(
-                                "got {} bytes of response data on stream {}",
-                                read, stream_id
+                                "[{:?}] got {} bytes of response data on stream {}",
+                                start_ts.elapsed(), read, stream_id
                             );
-
-                            print!("{}", unsafe {
-                                std::str::from_utf8_unchecked(&buf[..read])
-                            });
+                            // print!("{}", unsafe {
+                            //     std::str::from_utf8_unchecked(&buf[..read])
+                            // });
                         }
                     },
 
