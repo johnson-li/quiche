@@ -1592,7 +1592,7 @@ impl Connection {
         // Derive initial secrets for the client. We can do this here because
         // we already generated the random destination connection ID.
         if !is_server {
-            let mut dcid = [0; 16];
+            let mut dcid = [0; 20];
             rand::rand_bytes(&mut dcid[..]);
 
             let (aead_open, aead_seal) = crypto::derive_initial_key_material(

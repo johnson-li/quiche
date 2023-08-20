@@ -31,6 +31,7 @@ use std::net::{self, Ipv4Addr};
 
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::time::Instant;
 
 // use ring::rand::*;
 
@@ -125,6 +126,7 @@ fn main() {
     //     ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
 
     let mut clients = ClientMap::new();
+    let start_ts = Instant::now();
 
     loop {
         // Find the shorter timeout from all the active connections.
@@ -162,7 +164,7 @@ fn main() {
                     panic!("recv() failed: {:?}", e);
                 },
             };
-            info!("Recv {} bytes from {:?}", len, &from);
+            info!("[{:?}] Recv {} bytes from {:?}", start_ts.elapsed(), len, &from);
 
             let pkt_buf = &mut buf[..len];
 
@@ -179,7 +181,7 @@ fn main() {
                 },
             };
 
-            info!("got packet {:?}, scid len: {}, dcid len: {}", hdr, hdr.scid.len(), hdr.dcid.len());
+            info!("[{:?}] got packet {:?}, scid len: {}, dcid len: {}", start_ts.elapsed(), hdr, hdr.scid.len(), hdr.dcid.len());
 
             // let conn_id = ring::hmac::sign(&conn_id_seed, &hdr.dcid);
             // let conn_id = &conn_id.as_ref()[..quiche::MAX_CONN_ID_LEN];
@@ -205,7 +207,7 @@ fn main() {
 
                     let out = &out[..len];
 
-                    info!("Send {} bytes to {:?}", out.len(), &from);
+                    info!("[{:?}] Send {} bytes to {:?}", start_ts.elapsed(), out.len(), &from);
                     if let Err(e) = socket.send_to(out, &from) {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
                             debug!("send() would block");
@@ -244,7 +246,7 @@ fn main() {
 
                     let out = &out[..len];
 
-                    info!("Send {} bytes to {:?}", out.len(), &from);
+                    info!("[{:?}] Send {} bytes to {:?}", start_ts.elapsed(), out.len(), &from);
                     if let Err(e) = socket.send_to(out, &from) {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
                             debug!("send() would block");
@@ -310,7 +312,7 @@ fn main() {
                 },
             };
 
-            info!("{} processed {} bytes", client.conn.trace_id(), read);
+            info!("[{:?}] {} processed {} bytes", start_ts.elapsed(), client.conn.trace_id(), read);
 
             // Create a new HTTP/3 connection as soon as the QUIC connection
             // is established.
@@ -318,8 +320,8 @@ fn main() {
                 client.http3_conn.is_none()
             {
                 info!(
-                    "{} QUIC handshake completed, now trying HTTP/3",
-                    client.conn.trace_id()
+                    "[{:?}] {} QUIC handshake completed, now trying HTTP/3",
+                    start_ts.elapsed(), client.conn.trace_id()
                 );
 
                 let h3_conn = match quiche::h3::Connection::with_transport(
@@ -363,7 +365,8 @@ fn main() {
 
                         Ok((stream_id, quiche::h3::Event::Data)) => {
                             info!(
-                                "{} got data on stream id {}",
+                                "[{:?}] {} got data on stream id {}",
+                                start_ts.elapsed(),
                                 client.conn.trace_id(),
                                 stream_id
                             );
@@ -416,7 +419,7 @@ fn main() {
                     },
                 };
 
-                info!("Send {} bytes to {:?}", out.len(), &send_info.to);
+                info!("[{:?}] Send {} bytes to {:?}", start_ts.elapsed(), out.len(), &send_info.to);
                 if let Err(e) = socket.send_to(&out[..write], &send_info.to) {
                     if e.kind() == std::io::ErrorKind::WouldBlock {
                         debug!("send() would block");
@@ -426,7 +429,7 @@ fn main() {
                     panic!("send() failed: {:?}", e);
                 }
 
-                info!("{} written {} bytes", client.conn.trace_id(), write);
+                info!("[{:?}] {} written {} bytes", start_ts.elapsed(), client.conn.trace_id(), write);
             }
         }
 
@@ -436,7 +439,8 @@ fn main() {
 
             if c.conn.is_closed() {
                 info!(
-                    "{} connection collected {:?}",
+                    "[{:?}] {} connection collected {:?}",
+                    start_ts.elapsed(),
                     c.conn.trace_id(),
                     c.conn.stats()
                 );

@@ -100,7 +100,7 @@ fn main() {
                 let sessions: HashMap<String, Vec<u8>> = bincode::deserialize(&data).unwrap();
                 Some(sessions)
             }
-            Err(_) => Some(HashMap::new()),
+            Err(_) => Some(HashMap::new())
         } 
     } else {
         None
@@ -206,12 +206,15 @@ fn main() {
             conn.set_session(&session).unwrap();
         }
     }
+    let dsid = conn.destination_id();
     info!(
-        "connecting to {:} from {:} with scid {} (len: {})",
+        "connecting to {:} from {:} with scid {} (len: {}), dsid {} (len: {})",
         peer_addr,
         socket.local_addr().unwrap(),
         hex_dump(&scid),
         scid.len(),
+        hex_dump(&dsid),
+        dsid.len(),
     );
 
     let (mut write, send_info) = if ip_proxy.is_some() {
