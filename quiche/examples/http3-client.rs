@@ -4,7 +4,7 @@ extern crate clap;
 
 use clap::Parser;
 use url::Url;
-use std::{net::{Ipv4Addr, SocketAddr}, time::Instant, collections::HashMap};
+use std::{net::{Ipv4Addr, SocketAddr, SocketAddrV4}, time::Instant, collections::HashMap};
 use ring::rand::*;
 use env_logger::Builder;
 use log::LevelFilter;
@@ -75,6 +75,8 @@ struct MyArgs {
     aeacus_proxy: Option<String>,
     #[arg(short, long)]
     zero_rtt: bool,
+    #[arg(short, long)]
+    passive_migration: bool,
 }
 
 fn main() {
@@ -92,6 +94,7 @@ fn main() {
     let ip_proxy = args.ip_proxy;
     let zero_rtt = args.zero_rtt;
     let ldns = args.ldns;
+    let passive_migration = args.passive_migration;
     let session_file = "/tmp/http3-client-session.bin";
     let mut sessions: Option<HashMap<String, Vec<u8>>> = if zero_rtt {
         match std::fs::metadata(session_file) {
@@ -125,6 +128,7 @@ fn main() {
     config.set_initial_max_streams_uni(100);
     config.set_disable_active_migration(true);
     config.enable_early_data();
+    let mut server_addr: Option<SocketAddr> = None;
 
     let start_ts = Instant::now();
     // If Aeacus proxy is in use, there is no need to perform name resolution
@@ -198,6 +202,7 @@ fn main() {
     let mut scid = [0; quiche::MAX_CONN_ID_LEN];
     SystemRandom::new().fill(&mut scid[..]).unwrap();
     let scid = quiche::ConnectionId::from_ref(&scid);
+    let mut finish = false;
     let mut conn =
         quiche::connect(url.domain(), &scid, peer_addr, &mut config).unwrap();
     if let Some(sessions) = &mut sessions {
@@ -238,8 +243,12 @@ fn main() {
     if ip_proxy.is_some() {
         write += 4;
     }
-    info!("[{:?}] Send {} bytes to {:?}", start_ts.elapsed(), write, &send_info.to);
-    while let Err(e) = socket.send_to(&out[..write], &send_info.to) {
+    let target = match server_addr {
+        Some(v) => v,
+        None => send_info.to,
+    };
+    info!("[{:?}] Send {} bytes to {:?}", start_ts.elapsed(), write, &target);
+    while let Err(e) = socket.send_to(&out[..write], &target) {
         if e.kind() == std::io::ErrorKind::WouldBlock {
             debug!("send() would block");
             continue;
@@ -266,8 +275,12 @@ fn main() {
         if ip_proxy.is_some() {
             write += 4;
         }
-        info!("[{:?}] Send {} bytes to {:?}", start_ts.elapsed(), write, &send_info.to);
-        while let Err(e) = socket.send_to(&out[..write], &send_info.to) {
+        let target = match server_addr {
+            Some(v) => v,
+            None => send_info.to,
+        };
+        info!("[{:?}] Send {} bytes to {:?}", start_ts.elapsed(), write, &target);
+        while let Err(e) = socket.send_to(&out[..write], &target) {
             if e.kind() == std::io::ErrorKind::WouldBlock {
                 debug!("send() would block");
                 continue;
@@ -303,6 +316,16 @@ fn main() {
                 },
             };
             info!("[{:?}] Recv {} bytes from {:?}", start_ts.elapsed(), len, &from);
+            if passive_migration {
+                match from.ip() {
+                    std::net::IpAddr::V4(ip) => {
+                        info!("[0] migrate server to {:?}", server_addr);
+                        server_addr = Some(SocketAddrV4::new(ip, 443).into());
+                        conn.peer_addr = server_addr.unwrap();
+                    },
+                    std::net::IpAddr::V6(_) => {},
+                }
+            }
             let recv_info = quiche::RecvInfo { from };
             let _ = match conn.recv(&mut buf[..len], recv_info) {
                 Ok(v) => v,
@@ -339,6 +362,10 @@ fn main() {
             break;
         }
 
+        if conn.is_established() && finish {
+            conn.close(true, 0x00, b"kthxbye").unwrap();
+        }
+
         // Create a new HTTP/3 connection once the QUIC connection is established.
         if conn.is_established() && http3_conn.is_none() {
             info!(
@@ -351,7 +378,12 @@ fn main() {
             }
             if aeacus_proxy.is_some() {
                 let server = Ipv4Addr::from(conn.get_preferred_address());
-                info!("migrate server to {}", server);
+                let o = server.octets();
+                if o[0] == 0 && o[1] == 0 && o[2] == 0 && o[3] == 0 {
+                    info!("Invalid preferred address");
+                } else {
+                    info!("migrate server to {}", server);
+                }
                 conn.peer_addr = format!("{}:443", server).parse().expect("Fail to convert IP from str");
             }
             http3_conn = Some(
@@ -401,7 +433,10 @@ fn main() {
                             "response received in {:?}, closing...",
                             start_ts.elapsed()
                         );
-                        conn.close(true, 0x00, b"kthxbye").unwrap();
+                        finish = true;
+                        if conn.is_established() {
+                            conn.close(true, 0x00, b"kthxbye").unwrap();
+                        }
                     },
 
                     Ok((_stream_id, quiche::h3::Event::Reset(e))) => {
@@ -455,8 +490,12 @@ fn main() {
             if ip_proxy.is_some() {
                 write += 4;
             }
-            info!("[{:?}] Send {} bytes to {:?}", start_ts.elapsed(), write, &send_info.to);
-            if let Err(e) = socket.send_to(&out[..write], &send_info.to) {
+            let target = match server_addr {
+                Some(v) => v,
+                None => send_info.to,
+            };
+            info!("[{:?}] Send {} bytes to {:?}", start_ts.elapsed(), write, &target);
+            if let Err(e) = socket.send_to(&out[..write], &target) {
                 if e.kind() == std::io::ErrorKind::WouldBlock {
                     debug!("send() would block");
                     break;
