@@ -77,6 +77,8 @@ struct MyArgs {
     zero_rtt: bool,
     #[arg(short, long)]
     passive_migration: bool,
+    #[arg(short, long)]
+    verify_tls: bool,
 }
 
 fn main() {
@@ -94,6 +96,7 @@ fn main() {
     let ip_proxy = args.ip_proxy;
     let zero_rtt = args.zero_rtt;
     let ldns = args.ldns;
+    let verify_tls = args.verify_tls;
     let passive_migration = args.passive_migration;
     let session_file = "/tmp/http3-client-session.bin";
     let mut sessions: Option<HashMap<String, Vec<u8>>> = if zero_rtt {
@@ -113,7 +116,7 @@ fn main() {
 
     // Create the configuration for the QUIC connection.
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
-    config.verify_peer(false);
+    config.verify_peer(verify_tls);
     config
         .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
         .unwrap();
@@ -319,8 +322,8 @@ fn main() {
             if passive_migration {
                 match from.ip() {
                     std::net::IpAddr::V4(ip) => {
-                        info!("[0] migrate server to {:?}", server_addr);
                         server_addr = Some(SocketAddrV4::new(ip, 443).into());
+                        info!("[0] migrate server to {:?}", server_addr);
                         conn.peer_addr = server_addr.unwrap();
                     },
                     std::net::IpAddr::V6(_) => {},
@@ -363,7 +366,7 @@ fn main() {
         }
 
         if conn.is_established() && finish {
-            conn.close(true, 0x00, b"kthxbye").unwrap();
+            conn.close(true, 0x00, b"kthxbye").ok();
         }
 
         // Create a new HTTP/3 connection once the QUIC connection is established.

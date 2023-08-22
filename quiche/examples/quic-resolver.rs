@@ -6,7 +6,7 @@ use clap::Parser;
 use std::collections::HashMap;
 use std::{mem, io};
 use std::error::Error;
-use std::net::{SocketAddr, UdpSocket, SocketAddrV4};
+use std::net::{SocketAddr, UdpSocket, SocketAddrV4, Ipv4Addr};
 use std::str::FromStr;
 use smoltcp::wire::{EthernetFrame, Ipv4Address, Ipv4Packet, UdpPacket, IpProtocol, EthernetProtocol, EthernetAddress};
 use std::time::Instant;
@@ -19,6 +19,8 @@ use libc::{socket, recvfrom, PF_PACKET, SOCK_RAW, SOCK_NONBLOCK, c_void, sockadd
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
 const ETH_TYPE: u16 = 0x0800;
+const HANDSHAKE_TIMEOUT: u16 = 3000; // in ms
+const FORWARDING_TIMES_LIMIT: u16 = 3;
 
 pub fn init_quic_config() -> Config {
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
@@ -74,16 +76,76 @@ fn dns_query(name: &str, socket: &UdpSocket) {
     socket.send(&query).unwrap();
 }
 
+struct ForwardingItem {
+    eth_buf: Vec<u8>,
+    packet_size: u16,
+    last_sent_ts: Instant,
+    times: u16,
+}
+type ForwardingMap = HashMap<String, Vec<ForwardingItem>>;
+
+fn forward_packet(item: &mut ForwardingItem, target_ip: Ipv4Addr, interface_index: i32, raw_fd: i32, start_ts: Instant) {
+    let mut eth = EthernetFrame::new_checked(item.eth_buf.clone()).unwrap();
+    let eth_src: EthernetAddress = "3a:4d:a7:05:2a:13".parse().unwrap();
+    eth.set_src_addr(eth_src);
+    let mut ipv4 = Ipv4Packet::new_checked(eth.payload_mut()).unwrap();
+    let src = ipv4.src_addr();
+    let mut udp = UdpPacket::new_checked(ipv4.payload_mut()).unwrap();
+    udp.fill_checksum(&src.into(), &target_ip.into());
+    ipv4.set_dst_addr(target_ip.into());
+    ipv4.fill_checksum();
+    let send_data = eth.as_ref();
+    let destination_mac: [u8; 8] = [0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED, 0x00, 0x00];
+    let sockaddr = libc::sockaddr_ll {
+        sll_family: libc::AF_PACKET as u16,
+        sll_protocol: libc::ETH_P_ALL.to_be() as u16,
+        sll_ifindex: interface_index as i32, 
+        sll_halen: 6,
+        sll_addr: destination_mac,
+        sll_pkttype: 0,
+        ..unsafe { std::mem::zeroed() }
+    };
+    let len = unsafe {
+        sendto(raw_fd, send_data.as_ptr() as *mut c_void, 
+        item.packet_size as usize, 0,
+        &sockaddr as *const _ as *const libc::sockaddr, 
+        std::mem::size_of_val(&sockaddr) as libc::socklen_t)
+    };
+    info!("[{:?}] Forward {}({}) bytes from {} to {}", start_ts.elapsed(), len, item.packet_size, src, target_ip);
+    if len < 0 {
+        let error = io::Error::last_os_error();
+        eprintln!("Error sending packet: {}", error);
+    }
+    item.times += 1;
+    item.last_sent_ts = Instant::now();
+}
+
+fn forward_packets(name: &String, forwarding_map: &mut ForwardingMap,
+                   interface_index: i32, raw_fd: i32, forward_once: bool, start_ts: Instant, target_ip: Ipv4Addr) {
+    if let Some(eths) = forwarding_map.get_mut(name) {
+        let mut to_be_del = Vec::new();
+        for (pos, item) in eths.iter_mut().enumerate() {
+            forward_packet(item, target_ip, interface_index, raw_fd, start_ts);
+            if item.times > FORWARDING_TIMES_LIMIT {
+                to_be_del.push(pos);
+            }
+        }
+        if forward_once {
+            eths.clear();
+        } else {
+            for pos in to_be_del.iter().rev() {
+                eths.remove(*pos);
+            }
+        }
+    }
+}
+
 fn udp_server(interface_index: i32, forward_once: bool) -> Result<(), Box<dyn Error>> {
+    let monitor_socket = UdpSocket::bind("0.0.0.0:8080")?;
+    monitor_socket.set_nonblocking(true)?;
     let dns_socket = UdpSocket::bind("0.0.0.0:0")?;
     dns_socket.set_nonblocking(true)?;
     dns_socket.connect(SocketAddr::new("127.0.0.1".parse().unwrap(), 8053))?;
-    // let client_fd = unsafe {
-    //     let fd = socket(PF_PACKET, SOCK_RAW|SOCK_NONBLOCK, ETH_TYPE.to_be() as i32);
-    //     let res = setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, "enp0s8".as_ptr() as *const c_void, 6);
-    //     info!("Bind NIC res: {}", res);
-    //     fd
-    // };
     let raw_fd = unsafe {
         let fd = socket(PF_PACKET, SOCK_RAW|SOCK_NONBLOCK, ETH_TYPE.to_be() as i32);
         let res = setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, "br0".as_ptr() as *const c_void, 3);
@@ -91,7 +153,7 @@ fn udp_server(interface_index: i32, forward_once: bool) -> Result<(), Box<dyn Er
         fd
     };
 
-    let mut forwarding_map: HashMap<String, Vec<((Vec<u8>, u16, sockaddr, isize), SocketAddr)>> = HashMap::new();
+    let mut forwarding_map: ForwardingMap = HashMap::new();
     let mut connection_map: HashMap<SocketAddr, String> = HashMap::new();
     let mut resolution_record: HashMap<String, String> = HashMap::new();
     let mut recv_buf: [u8; MAX_DATAGRAM_SIZE] = [0; MAX_DATAGRAM_SIZE];
@@ -110,7 +172,7 @@ fn udp_server(interface_index: i32, forward_once: bool) -> Result<(), Box<dyn Er
             packet_size = recvfrom(raw_fd, recv_buf.as_mut_ptr() as *mut c_void, recv_buf.len(), 0,
                                    addr_ptr as *mut sockaddr, &mut addr_buf_sz);
         }
-        if packet_size >= 1200 {
+        if packet_size >= 1 {
             let mut eth = EthernetFrame::new_checked(recv_buf.clone()).unwrap();
             if eth.ethertype() == EthernetProtocol::Ipv4 {
                 let mut ipv4 = match Ipv4Packet::new_checked(eth.payload_mut()) {
@@ -148,19 +210,16 @@ fn udp_server(interface_index: i32, forward_once: bool) -> Result<(), Box<dyn Er
                                     info!("The domain name is not resolved yet, store to the forwarding map");
                                     let eths = forwarding_map.entry(domain.clone()).or_insert(Vec::new());
                                     info!("Save {} bytes: {}", eth.as_ref().len(), domain);
-                                    unsafe {
-                                        eths.push(((eth.as_ref().to_vec(), packet_size as u16, *addr_ptr, addr_buf_sz as isize), addr));
-                                    }
+                                    eths.push(ForwardingItem { eth_buf: (eth.as_ref().to_vec()), packet_size: (packet_size as u16), last_sent_ts: (Instant::now()), times: (0) });
                                 }
                             // Send DNS query and wait for name resolution before forwarding
                             } else {
                                 info!("Send DNS query and wait for name resolution");
                                 match parse_server_name(addr, &udp.payload_mut().to_vec(), &mut config) {
                                     Some(domain) => {
+                                        connection_map.insert(addr, domain.clone());
                                         let eths = forwarding_map.entry(domain.clone()).or_insert(Vec::new());
-                                        unsafe {
-                                            eths.push(((eth.as_ref().to_vec(), packet_size as u16, *addr_ptr, addr_buf_sz as isize), addr));
-                                        }
+                                        eths.push(ForwardingItem { eth_buf: (eth.as_ref().to_vec()), packet_size: (packet_size as u16), last_sent_ts: (Instant::now()), times: (0) });
                                         info!("Save {} bytes: {}", eth.as_ref().len(), domain);
                                         dns_query(&domain, &dns_socket);
                                     },
@@ -185,50 +244,7 @@ fn udp_server(interface_index: i32, forward_once: bool) -> Result<(), Box<dyn Er
                             info!("Finish name resolution, {}: {}", name, ip);
                             resolution_record.insert(name.clone(), ip.to_string());
                             // Forward pending packets
-                            if let Some(eths) = forwarding_map.get_mut(&name) {
-                                for ((eth_buf, packet_size, _, _), addr) in &mut *eths {
-                                    connection_map.insert(*addr, name.clone());
-                                    let mut eth = EthernetFrame::new_checked(eth_buf.clone()).unwrap();
-                                    let eth_src: EthernetAddress = "3a:4d:a7:05:2a:13".parse().unwrap();
-                                    eth.set_src_addr(eth_src);
-                                    let mut ipv4 = Ipv4Packet::new_checked(eth.payload_mut()).unwrap();
-                                    let src = ipv4.src_addr();
-                                    let mut udp = UdpPacket::new_checked(ipv4.payload_mut()).unwrap();
-                                    udp.fill_checksum(&src.into(), &ip.into());
-                                    ipv4.set_dst_addr(ip.into());
-                                    ipv4.fill_checksum();
-                                    let send_data = eth.as_ref();
-
-                                    // let interface_name = "br0";
-                                    // let interface_index = unsafe {
-                                    //     libc::if_nametoindex(interface_name.as_ptr() as *const libc::c_char)
-                                    // };
-                                    info!("NIC index: {}", interface_index);
-                                    let destination_mac: [u8; 8] = [0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED, 0x00, 0x00];
-                                    let sockaddr = libc::sockaddr_ll {
-                                        sll_family: libc::AF_PACKET as u16,
-                                        sll_protocol: libc::ETH_P_ALL.to_be() as u16,
-                                        sll_ifindex: interface_index as i32, 
-                                        sll_halen: 6,
-                                        sll_addr: destination_mac,
-                                        sll_pkttype: 0,
-                                        ..unsafe { std::mem::zeroed() }
-                                    };
-                                    unsafe {
-                                        let len = sendto(raw_fd, send_data.as_ptr() as *mut c_void, *packet_size as usize, 0,
-                                                          &sockaddr as *const _ as *const libc::sockaddr, 
-                                                          std::mem::size_of_val(&sockaddr) as libc::socklen_t);
-                                        info!("[{:?}] Forward {}({}) bytes from {} to {}", start_ts.elapsed(), len, packet_size, addr, ip);
-                                        if len < 0 {
-                                            let error = io::Error::last_os_error();
-                                            eprintln!("Error sending packet: {}", error);
-                                        }
-                                    }
-                                }
-                                if forward_once {
-                                    eths.clear();
-                                }
-                            }
+                            forward_packets(&name, &mut forwarding_map, interface_index, raw_fd, forward_once, start_ts, ip);
                             break;
                         }
                         _ => { }
@@ -237,6 +253,60 @@ fn udp_server(interface_index: i32, forward_once: bool) -> Result<(), Box<dyn Er
             },
             _ => { }
         }
+    
+        // Step 3, read from the QUIC monitor
+        match monitor_socket.recv(&mut recv_buf) {
+            Ok(len) => {
+                if len == 10 {
+                    let status = recv_buf[0]; 
+                    let port: u16 = ((recv_buf[1] as u16) << 8) | recv_buf[2] as u16;
+                    let domain = connection_map.get(&SocketAddr::new("10.0.10.10".parse().unwrap(), port)) ;
+                    if let Some(domain) = domain {
+                        // Handshake success
+                        if status == 1 {
+                            info!("QUIC handshake succeeded, port: {}, domain: {:?}", port, domain);
+                            forwarding_map.remove(domain);
+                        } else if status == 2 {
+                            info!("QUIC handshake failed, port: {}, domain: {:?}", port, domain);
+                            if let Some(target_ip) = resolution_record.get(domain) {
+                                info!("Re-forwarding pending packets of {} to {}", domain, target_ip);
+                                forward_packets(domain, &mut forwarding_map, interface_index, raw_fd, forward_once, start_ts, target_ip.parse().unwrap())
+                            } else {
+                                info!("Name resolution has not completed yet, nothing to do");
+                            }
+                        } else {
+                            error!("Unknown handshake status: {}", status)
+                        }
+                    } else {
+                        error!("Failed to find domain name for port: {}", port);
+                    }
+                } else {
+                    error!("Failed to read from QUIC monitor");
+                }
+            },
+            Err(_) => { },
+        }
+
+        // Step 4, check handshake timeout
+        for (domain, eths) in forwarding_map.iter_mut() {
+            let mut to_be_del = Vec::new();
+            for (pos, item) in eths.iter_mut().enumerate() {
+                if item.last_sent_ts.elapsed().as_millis() > HANDSHAKE_TIMEOUT as u128 {
+                    info!("Handshake timeout, port: {}, domain: {}", item.eth_buf[1], domain);
+                    if let Some(target_ip) = resolution_record.get(domain) {
+                        forward_packet(item, target_ip.parse().unwrap(), interface_index, raw_fd, start_ts);
+                    } else {
+                        info!("Name resolution has not completed yet, nothing to do: {}", domain);
+                    }
+                    if item.times > FORWARDING_TIMES_LIMIT {
+                        to_be_del.push(pos);
+                    }
+                }
+            }
+            for pos in to_be_del.iter().rev() {
+                eths.remove(*pos);
+            }
+        } 
     }
 }
 

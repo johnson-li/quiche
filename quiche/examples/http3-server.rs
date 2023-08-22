@@ -181,7 +181,7 @@ fn main() {
                 },
             };
 
-            info!("[{:?}] got packet {:?}, scid len: {}, dcid len: {}", start_ts.elapsed(), hdr, hdr.scid.len(), hdr.dcid.len());
+            info!("[{:?}] got packet {:?}, scid len: {}, dcid len: {}", start_ts.elapsed(), hdr.ty, hdr.scid.len(), hdr.dcid.len());
 
             // let conn_id = ring::hmac::sign(&conn_id_seed, &hdr.dcid);
             // let conn_id = &conn_id.as_ref()[..quiche::MAX_CONN_ID_LEN];

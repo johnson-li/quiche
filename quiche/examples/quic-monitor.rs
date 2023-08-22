@@ -1,42 +1,15 @@
-use std::collections::HashMap;
-use pcap::{Device, Capture};
-use argparse::{ArgumentParser, Store};
-use smoltcp::wire::{EthernetFrame, Ipv4Packet, UdpPacket};
-use quiche::{Config, Header};
-use std::thread;
-use std::net::{TcpStream, TcpListener, SocketAddr, IpAddr, Ipv4Addr};
-use std::io::{Read, Write};
-use std::sync::Arc;
-use chashmap::CHashMap;
+#[macro_use] 
+extern crate log;
+
+use std::mem;
+use smoltcp::wire::{EthernetFrame, Ipv4Packet, UdpPacket, EthernetProtocol, IpProtocol};
+use quiche::Config;
+use std::net::UdpSocket;
 use quiche::Type::{Initial, Short};
+use libc::{socket, recvfrom, PF_PACKET, SOCK_RAW, SOCK_NONBLOCK, c_void, sockaddr_ll, sockaddr, setsockopt, SOL_SOCKET, SO_BINDTODEVICE, socklen_t};
 
-
-fn handle_connection(mut stream: TcpStream) {
-    let mut buf: [u8; 10] = [0; 10];
-    let mut data: [u8; 10] = [1; 10];
-    match stream.read(buf.as_mut_slice()) {
-        Ok(size) => {
-            println!("{}", size);
-            if size != 10 {
-                println!("Size wrong: {}", size);
-                return;
-            }
-            stream.write_all(data.as_mut_slice()).unwrap();
-            stream.flush().unwrap();
-        }
-        _ => return
-    };
-}
-
-fn web_server(_map: Arc<CHashMap<ConnectionKey, u8>>) {
-    let addr = "127.0.0.1:8087";
-    println!("Listening on {}", addr);
-    let listener = TcpListener::bind(addr).unwrap();
-    for stream in listener.incoming() {
-        let stream = stream.unwrap();
-        handle_connection(stream);
-    }
-}
+const MAX_DATAGRAM_SIZE: usize = 1350;
+const ETH_TYPE: u16 = 0x0800;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Debug)]
 struct ConnectionKey {
@@ -46,7 +19,6 @@ struct ConnectionKey {
 
 
 pub fn init_quic_config() -> Config {
-    const MAX_DATAGRAM_SIZE: usize = 1350;
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
     config.load_cert_chain_from_pem_file("cert.crt").unwrap();
     config.load_priv_key_from_pem_file("cert.key").unwrap();
@@ -65,130 +37,67 @@ pub fn init_quic_config() -> Config {
     config
 }
 
-fn quic_monitor(map: Arc<CHashMap<ConnectionKey, u8>>) {
-    let mut connections = HashMap::new();
-    let mut config = init_quic_config();
-    let mut nic = "lo".to_string();
-    {
-        let mut ap = ArgumentParser::new();
-        ap.set_description("Monitor the QUIC traffic");
-        ap.refer(&mut nic)
-            .add_option(&["--nic"], Store,
-                        "Name of the NIC");
-        ap.parse_args_or_exit();
-    }
-    let dev_list = Device::list().unwrap();
-    let mut dev_list = dev_list.into_iter().filter(|d| d.name == nic).collect::<Vec<Device>>();
-    if dev_list.is_empty() {
-        println!("NIC not found: {}", nic);
-        return;
-    }
+fn quic_monitor() {
+    // let mut connections = HashMap::new();
+    let nic = "br0".to_string();
     println!("Capturing {}", nic);
-    let dev = dev_list.pop().unwrap();
-    let mut cap = Capture::from_device(dev).unwrap()
-        .promisc(true)
-        .timeout(1)
-        .snaplen(5000)
-        .open().unwrap();
-
+    let sock_quic_resolver = UdpSocket::bind("0.0.0.0:0").unwrap();
+    sock_quic_resolver.set_nonblocking(true).unwrap();
+    sock_quic_resolver.connect("192.168.57.12:8080").unwrap();
+    let raw_fd = unsafe {
+        let fd = socket(PF_PACKET, SOCK_RAW|SOCK_NONBLOCK, ETH_TYPE.to_be() as i32);
+        let res = setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, nic.as_ptr() as *const c_void, 3);
+        info!("Bind NIC res: {}", res);
+        fd
+    };
     let mut recv_buf: [u8; 10240] = [0; 10240];
-    while let Ok(packet) = cap.next_packet() {
-        recv_buf[..packet.len()].copy_from_slice(packet.data);
-        let mut ethernet = EthernetFrame::new_checked(recv_buf).unwrap();
-        let mut ipv4 = match Ipv4Packet::new_checked(ethernet.payload_mut()) {
-            Ok(v) => v,
-            _ => continue
-        };
-        let src_addr = ipv4.src_addr();
-        let dst_addr = ipv4.dst_addr();
-        let mut udp = match UdpPacket::new_checked(ipv4.payload_mut()) {
-            Ok(v) => v,
-            _ => continue
-        };
-        let src_port = udp.src_port();
-        let dst_port = udp.dst_port();
-        if dst_port != 4433 && src_port != 4433 &&
-            dst_port != 443 && src_port != 443 {
-            continue;
+    let mut sender_addr: sockaddr_ll = unsafe { mem::zeroed() };
+    let mut addr_buf_sz: socklen_t = mem::size_of::<sockaddr_ll>() as socklen_t;
+    let mut addr_ptr: *mut sockaddr;
+    let mut packet_size: isize;
+    loop {
+        unsafe {
+            addr_ptr = mem::transmute::<*mut sockaddr_ll, *mut sockaddr>(&mut sender_addr);
+            packet_size = recvfrom(raw_fd, recv_buf.as_mut_ptr() as *mut c_void, recv_buf.len(), 0,
+                                   addr_ptr as *mut sockaddr, &mut addr_buf_sz);
         }
-        let mut payload = udp.payload_mut();
-        let payload_len = payload.len();
-        // println!("Received UDP packet of {} bytes", payload.len());
-
-        loop {
-            let quic_hdr = match Header::from_slice2(payload) {
+        let mut eth = EthernetFrame::new_checked(recv_buf.clone()).unwrap();
+        if eth.ethertype() == EthernetProtocol::Ipv4 {
+            let mut ipv4 = match Ipv4Packet::new_checked(eth.payload_mut()) {
                 Ok(v) => v,
-                Err(e) => {
-                    println!("Failed to parse QUIC header: {}", e);
-                    break;
-                }
+                _ => continue,
             };
-            println!("[{}:{} > {}:{}] size={}, packet type={:?}, {:?}", src_addr, src_port,
-                     dst_addr, dst_port, payload_len, quic_hdr.ty, quic_hdr);
-            let conn_key = if src_port == 4433 || src_port == 443 {
-                ConnectionKey {
-                    client_port: dst_port,
-                    server_ip: src_addr.to_string(),
-                }
-            } else {
-                ConnectionKey {
-                    client_port: src_port,
-                    server_ip: dst_addr.to_string(),
-                }
-            };
-            let mut state: u8 = if map.contains_key(&conn_key) {
-                *map.get(&conn_key).unwrap()
-            } else {
-                0
-            };
-            let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::from(src_addr)), src_port);
-            let recv_info = quiche::RecvInfo { from };
-            if state != 2 {
-                if quic_hdr.ty == Initial {
-                    state += 1;
-                    map.insert(conn_key.clone(), state);
-                    let scid = quic_hdr.scid.clone();
-                    let mut conn = quiche::accept(&scid, None, from, &mut config).unwrap();
-                    let read = match conn.recv_lite(payload, recv_info) {
+            let src = ipv4.src_addr();
+            // let dst = ipv4.dst_addr();
+            if ipv4.protocol() == IpProtocol::Udp {
+                let mut udp = UdpPacket::new_unchecked(ipv4.payload_mut());
+                if udp.dst_port() == 443 || udp.src_port() == 443 {
+                    info!("Detected {} bytes from {:?}", packet_size, src);
+                    let hdr: quiche::Header<'_> = match quiche::Header::from_slice(&mut udp.payload_mut(), quiche::MAX_CONN_ID_LEN) {
                         Ok(v) => v,
-                        Err(e) => {
-                            println!("{}", e);
-                            0
-                        }
+                        Err(_) => continue,
                     };
-                    connections.insert(conn_key.clone(), conn);
-                    println!("QUIC read {} bytes", read);
-                    if read > 0 {
-                        payload = payload[read..].as_mut();
-                        continue
+                    let port = if udp.dst_port() == 443 {
+                        udp.src_port()
+                    } else {
+                        udp.dst_port()
+                    };
+                    if hdr.ty == Short {
+                        // Short header indicates successful handshake
+                        let mut buf: [u8; 10] = [0; 10];
+                        buf[0] = 1;
+                        buf[1] = ((port >> 8) & 0xff) as u8;
+                        buf[2] = (port & 0xff) as u8;
+                        sock_quic_resolver.send(buf.as_ref()).unwrap();
+                    } else if hdr.ty == Initial {
+
                     }
                 }
-            } else if state == 1 && (src_port == 443 || src_port == 4433) {
-
             }
-            if quic_hdr.ty == Short {
-                if *map.get(&conn_key).unwrap() != 2 {
-                    map.insert(conn_key.clone(), 2);
-                    println!("Handshake finished: {:?}", conn_key);
-                }
-            }
-            break
         }
     }
 }
 
 fn main() {
-    // let map: HashMap<u8, u8> = HashMap::new();
-    let map: CHashMap<ConnectionKey, u8> = CHashMap::new();
-    let map = Arc::new(map);
-    let m1 = map.clone();
-    let handle1 = thread::spawn(move || {
-        quic_monitor(m1);
-    });
-    let m2 = map.clone();
-    let handle2 = thread::spawn(move || {
-        web_server(m2);
-    });
-    handle1.join().unwrap();
-    handle2.join().unwrap();
+    quic_monitor();
 }
