@@ -1,6 +1,8 @@
 #[macro_use] 
 extern crate log;
 
+use env_logger::Builder;
+use log::LevelFilter;
 use std::mem;
 use smoltcp::wire::{EthernetFrame, Ipv4Packet, UdpPacket, EthernetProtocol, IpProtocol};
 use quiche::Config;
@@ -40,7 +42,7 @@ pub fn init_quic_config() -> Config {
 fn quic_monitor() {
     // let mut connections = HashMap::new();
     let nic = "br0".to_string();
-    println!("Capturing {}", nic);
+    info!("Capturing {}", nic);
     let sock_quic_resolver = UdpSocket::bind("0.0.0.0:0").unwrap();
     sock_quic_resolver.set_nonblocking(true).unwrap();
     sock_quic_resolver.connect("192.168.57.12:8080").unwrap();
@@ -60,6 +62,9 @@ fn quic_monitor() {
             addr_ptr = mem::transmute::<*mut sockaddr_ll, *mut sockaddr>(&mut sender_addr);
             packet_size = recvfrom(raw_fd, recv_buf.as_mut_ptr() as *mut c_void, recv_buf.len(), 0,
                                    addr_ptr as *mut sockaddr, &mut addr_buf_sz);
+        }
+        if packet_size <= 0 {
+            continue;
         }
         let mut eth = EthernetFrame::new_checked(recv_buf.clone()).unwrap();
         if eth.ethertype() == EthernetProtocol::Ipv4 {
@@ -88,6 +93,7 @@ fn quic_monitor() {
                         buf[0] = 1;
                         buf[1] = ((port >> 8) & 0xff) as u8;
                         buf[2] = (port & 0xff) as u8;
+                        info!("Notify resolver of successful handshake, port: {}", port);
                         sock_quic_resolver.send(buf.as_ref()).unwrap();
                     } else if hdr.ty == Initial {
 
@@ -99,5 +105,8 @@ fn quic_monitor() {
 }
 
 fn main() {
+    Builder::new()
+        .filter(None, LevelFilter::Info)
+        .init();
     quic_monitor();
 }

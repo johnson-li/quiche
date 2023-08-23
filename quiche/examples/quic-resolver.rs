@@ -105,6 +105,7 @@ fn forward_packet(item: &mut ForwardingItem, target_ip: Ipv4Addr, interface_inde
         sll_pkttype: 0,
         ..unsafe { std::mem::zeroed() }
     };
+    info!("Send packet to {:?}", target_ip);
     let len = unsafe {
         sendto(raw_fd, send_data.as_ptr() as *mut c_void, 
         item.packet_size as usize, 0,
@@ -140,7 +141,15 @@ fn forward_packets(name: &String, forwarding_map: &mut ForwardingMap,
     }
 }
 
+fn add_to_forwarding_map(forwarding_map: &mut ForwardingMap, eth: Vec<u8>, packet_size: isize, domain: &String, times: u16) {
+    let eths = forwarding_map.entry(domain.clone()).or_insert(Vec::new());
+    eths.push(ForwardingItem { eth_buf: (eth), packet_size: (packet_size as u16), last_sent_ts: (Instant::now()), times: (times) });
+}
+
 fn udp_server(interface_index: i32, forward_once: bool) -> Result<(), Box<dyn Error>> {
+    let dns_control_socket = UdpSocket::bind("0.0.0.0:0")?;
+    dns_control_socket.set_nonblocking(true)?;
+    dns_control_socket.connect(SocketAddr::new("127.0.0.1".parse().unwrap(), 8888))?;
     let monitor_socket = UdpSocket::bind("0.0.0.0:8080")?;
     monitor_socket.set_nonblocking(true)?;
     let dns_socket = UdpSocket::bind("0.0.0.0:0")?;
@@ -205,12 +214,11 @@ fn udp_server(interface_index: i32, forward_once: bool) -> Result<(), Box<dyn Er
                                                                 addr_ptr as *mut sockaddr, addr_buf_sz);
                                         info!("[{:?}] Forward {}({}) bytes from {} to {}", start_ts.elapsed(), len, eth.as_ref().len(), addr, server_ip)
                                     }
+                                    add_to_forwarding_map(&mut forwarding_map, eth.as_ref().to_vec(), packet_size, domain, 1);
                                 } else {
                                     // The domain name is not resovled yet, store to the forwarding map.
                                     info!("The domain name is not resolved yet, store to the forwarding map");
-                                    let eths = forwarding_map.entry(domain.clone()).or_insert(Vec::new());
-                                    info!("Save {} bytes: {}", eth.as_ref().len(), domain);
-                                    eths.push(ForwardingItem { eth_buf: (eth.as_ref().to_vec()), packet_size: (packet_size as u16), last_sent_ts: (Instant::now()), times: (0) });
+                                    add_to_forwarding_map(&mut forwarding_map, eth.as_ref().to_vec(), packet_size, domain, 0);
                                 }
                             // Send DNS query and wait for name resolution before forwarding
                             } else {
@@ -218,9 +226,7 @@ fn udp_server(interface_index: i32, forward_once: bool) -> Result<(), Box<dyn Er
                                 match parse_server_name(addr, &udp.payload_mut().to_vec(), &mut config) {
                                     Some(domain) => {
                                         connection_map.insert(addr, domain.clone());
-                                        let eths = forwarding_map.entry(domain.clone()).or_insert(Vec::new());
-                                        eths.push(ForwardingItem { eth_buf: (eth.as_ref().to_vec()), packet_size: (packet_size as u16), last_sent_ts: (Instant::now()), times: (0) });
-                                        info!("Save {} bytes: {}", eth.as_ref().len(), domain);
+                                        add_to_forwarding_map(&mut forwarding_map, eth.as_ref().to_vec(), packet_size, &domain, 0);
                                         dns_query(&domain, &dns_socket);
                                     },
                                     _ => { error!("Failed to parse/resolve the initial packet"); }
@@ -290,23 +296,37 @@ fn udp_server(interface_index: i32, forward_once: bool) -> Result<(), Box<dyn Er
         // Step 4, check handshake timeout
         for (domain, eths) in forwarding_map.iter_mut() {
             let mut to_be_del = Vec::new();
+            let mut make_query = false;
             for (pos, item) in eths.iter_mut().enumerate() {
                 if item.last_sent_ts.elapsed().as_millis() > HANDSHAKE_TIMEOUT as u128 {
-                    info!("Handshake timeout, port: {}, domain: {}", item.eth_buf[1], domain);
-                    if let Some(target_ip) = resolution_record.get(domain) {
-                        forward_packet(item, target_ip.parse().unwrap(), interface_index, raw_fd, start_ts);
-                    } else {
-                        info!("Name resolution has not completed yet, nothing to do: {}", domain);
-                    }
+                    item.last_sent_ts = Instant::now();
+                    item.times += 1;
+                    make_query = true;
                     if item.times > FORWARDING_TIMES_LIMIT {
                         to_be_del.push(pos);
                     }
                 }
             }
+            if make_query {
+                dns_control_socket.send(domain.as_bytes()).unwrap();
+            }
             for pos in to_be_del.iter().rev() {
                 eths.remove(*pos);
             }
         } 
+        
+        // Step 5, re-forward on DNS cache update
+        match dns_control_socket.recv(&mut recv_buf) {
+            Ok(len) => {
+                let data = String::from_utf8(recv_buf[..len].to_vec()).unwrap();
+                let data: Vec<&str> = data.split_whitespace().collect();
+                let domain = data[0].to_string();
+                let target_ip = data[1].to_string();
+                info!("Re-forwarding pending packets because of DNS cache update: {} -> {}", domain, target_ip);
+                forward_packets(&domain, &mut forwarding_map, interface_index, raw_fd, forward_once, start_ts, target_ip.parse().unwrap())
+            },
+            _ => { }
+        }
     }
 }
 
