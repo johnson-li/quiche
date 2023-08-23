@@ -74,6 +74,8 @@ struct MyArgs {
     #[arg(short, long)]
     aeacus_proxy: Option<String>,
     #[arg(short, long)]
+    server: Option<String>,
+    #[arg(short, long)]
     zero_rtt: bool,
     #[arg(short, long)]
     passive_migration: bool,
@@ -94,6 +96,7 @@ fn main() {
     let url = Url::parse(args.url.as_str()).unwrap();
     let aeacus_proxy = args.aeacus_proxy;
     let ip_proxy = args.ip_proxy;
+    let server = args.server;
     let zero_rtt = args.zero_rtt;
     let ldns = args.ldns;
     let verify_tls = args.verify_tls;
@@ -136,8 +139,8 @@ fn main() {
     let start_ts = Instant::now();
     // If Aeacus proxy is in use, there is no need to perform name resolution
     // Resolve the domain name if Aeacus proxy is not in use
-    let mut server_ip = None;
-    if aeacus_proxy.is_none() {
+    let mut server_ip = server;
+    if aeacus_proxy.is_none() && server_ip.is_none() {
         server_ip =  name_resolution_from_cache(&dns_cache, &domain.to_string());
         if server_ip.is_none() {
             let dns_socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
@@ -208,6 +211,9 @@ fn main() {
     let mut finish = false;
     let mut conn =
         quiche::connect(url.domain(), &scid, peer_addr, &mut config).unwrap();
+    // let dir = "/tmp";
+    // let writer = BufWriter::new(File::create(format!("{}/{}.qlog", dir, domain)).unwrap());
+    // conn.set_qlog(Box::new(writer), "title".to_string(), "desc".to_string());
     if let Some(sessions) = &mut sessions {
         if let Some(session) = sessions.get_mut(domain) {
             info!("Resuming session for {}", domain);

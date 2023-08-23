@@ -2022,8 +2022,7 @@ impl Connection {
                     &self.trace_id,
                 )
             })?;
-        // info!("Recv single, scid: {} (len: {}), dcid: {} (len: {})",
-        //     self.hex_dump(&self.scid), self.scid.len(), self.hex_dump(&self.dcid), self.dcid.len());
+        info!("Recv single, type: {:?}", hdr.ty, );
 
         if hdr.ty == packet::Type::VersionNegotiation {
             // Version negotiation packets can only be sent by the server.
@@ -2203,6 +2202,7 @@ impl Connection {
                 )
             })? as usize
         };
+        info!("Recv single, payload_len: {:?}", payload_len);
 
         // Make sure the buffer is same or larger than an explicit
         // payload length.
@@ -2387,6 +2387,7 @@ impl Connection {
         // Process packet payload.
         while payload.cap() > 0 {
             let frame = frame::Frame::from_bytes(&mut payload, hdr.ty)?;
+            info!("Recv frame: {:?}", frame);
 
             qlog_with_type!(QLOG_PACKET_RX, self.qlog, q, {
                 q.add_frame(frame.to_qlog(), false).ok();

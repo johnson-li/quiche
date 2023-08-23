@@ -27,7 +27,7 @@ include = [
 ]
 
 [features]
-default = ["boringssl-vendored"]
+default = ["boringssl-vendored", "qlog"]
 
 # Build vendored BoringSSL library.
 boringssl-vendored = []
