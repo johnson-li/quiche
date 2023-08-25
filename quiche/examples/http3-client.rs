@@ -2,9 +2,10 @@
 extern crate log;
 extern crate clap;
 
+use std::io::Read;
 use clap::Parser;
 use url::Url;
-use std::{net::{Ipv4Addr, SocketAddr, SocketAddrV4}, time::Instant, collections::HashMap};
+use std::{net::{Ipv4Addr, SocketAddr, SocketAddrV4}, time::Instant, collections::HashMap, fs};
 use ring::rand::*;
 use env_logger::Builder;
 use log::LevelFilter;
@@ -303,6 +304,7 @@ fn main() {
         path.push('?');
         path.push_str(query);
     }
+    let mut count = 0;
 
     loop {
         poll.poll(&mut events, conn.timeout()).unwrap();
@@ -325,6 +327,22 @@ fn main() {
                 },
             };
             info!("[{:?}] Recv {} bytes from {:?}", start_ts.elapsed(), len, &from);
+
+            // For testing the decoding of the reponse initial packets
+            // let mut f = fs::File::create("/tmp/recv.bin").unwrap();
+            // f.write_all(&buf[..len]).unwrap();
+
+            if false {
+                let mut f = fs::File::open("/tmp/recv.bin").unwrap();
+                let mut vec: Vec<u8> = Vec::new();
+                count += 1;
+                if count == 2 {
+                    f.read_to_end(&mut vec).unwrap();
+                    info!("Read {} bytes from /tmp/recv.bin", vec.len());
+                    buf[..vec.len()].copy_from_slice(&vec);
+                }
+            }
+
             if passive_migration {
                 match from.ip() {
                     std::net::IpAddr::V4(ip) => {
@@ -389,11 +407,11 @@ fn main() {
                 let server = Ipv4Addr::from(conn.get_preferred_address());
                 let o = server.octets();
                 if o[0] == 0 && o[1] == 0 && o[2] == 0 && o[3] == 0 {
-                    info!("Invalid preferred address");
+                    info!("Invalid preferred address, ignore");
                 } else {
                     info!("migrate server to {}", server);
+                    conn.peer_addr = format!("{}:443", server).parse().expect("Fail to convert IP from str");
                 }
-                conn.peer_addr = format!("{}:443", server).parse().expect("Fail to convert IP from str");
             }
             http3_conn = Some(
                 quiche::h3::Connection::with_transport(&mut conn, &h3_config)

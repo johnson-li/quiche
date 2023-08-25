@@ -2280,12 +2280,14 @@ impl Connection {
         packet::decrypt_hdr(&mut b, &mut hdr, aead).map_err(|e| {
             drop_pkt_on_err(e, self.recv_count, self.is_server, &self.trace_id)
         })?;
+        info!("hdr decrypted");
 
         let pn = packet::decode_pkt_num(
             self.pkt_num_spaces[epoch].largest_rx_pkt_num,
             hdr.pkt_num,
             hdr.pkt_num_len,
         );
+        // let pn =1;
 
         let pn_len = hdr.pkt_num_len;
 
@@ -2329,6 +2331,8 @@ impl Connection {
             q.add_event_data_with_instant(ev_data, now).ok();
         });
 
+        info!("starting decrypt: {}, {}", pn, payload_len);
+
         let mut payload = packet::decrypt_pkt(
             &mut b,
             pn,
@@ -2339,16 +2343,20 @@ impl Connection {
         .map_err(|e| {
             drop_pkt_on_err(e, self.recv_count, self.is_server, &self.trace_id)
         })?;
+        info!("payload decrypted, pn: {}", pn);
 
         if self.pkt_num_spaces[epoch].recv_pkt_num.contains(pn) {
             trace!("{} ignored duplicate packet {}", self.trace_id, pn);
             return Err(Error::Done);
         }
 
+        info!("asdf2");
+
         // Packets with no frames are invalid.
         if payload.cap() == 0 {
             return Err(Error::InvalidPacket);
         }
+        info!("asdf");
 
         if !self.is_server && !self.got_peer_conn_id {
             if self.odcid.is_none() {

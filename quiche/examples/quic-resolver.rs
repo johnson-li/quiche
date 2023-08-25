@@ -181,6 +181,7 @@ fn udp_server(interface_index: i32, forward_once: bool) -> Result<(), Box<dyn Er
             packet_size = recvfrom(raw_fd, recv_buf.as_mut_ptr() as *mut c_void, recv_buf.len(), 0,
                                    addr_ptr as *mut sockaddr, &mut addr_buf_sz);
         }
+        let packet_recv_ts = Instant::now();
         if packet_size >= 1 {
             let mut eth = EthernetFrame::new_checked(recv_buf.clone()).unwrap();
             if eth.ethertype() == EthernetProtocol::Ipv4 {
@@ -220,14 +221,28 @@ fn udp_server(interface_index: i32, forward_once: bool) -> Result<(), Box<dyn Er
                                     info!("The domain name is not resolved yet, store to the forwarding map");
                                     add_to_forwarding_map(&mut forwarding_map, eth.as_ref().to_vec(), packet_size, domain, 0);
                                 }
-                            // Send DNS query and wait for name resolution before forwarding
+                            // Perform name resolution before forwarding
                             } else {
-                                info!("Send DNS query and wait for name resolution");
                                 match parse_server_name(addr, &udp.payload_mut().to_vec(), &mut config) {
                                     Some(domain) => {
-                                        connection_map.insert(addr, domain.clone());
-                                        add_to_forwarding_map(&mut forwarding_map, eth.as_ref().to_vec(), packet_size, &domain, 0);
-                                        dns_query(&domain, &dns_socket);
+                                        if let Some(server_ip) = resolution_record.get(&domain) {
+                                            info!("Domain already resolved, forward directly, delay: {:?}", packet_recv_ts.elapsed());
+                                            let dst = Ipv4Address::from_str(server_ip).unwrap();
+                                            udp.fill_checksum(&src.into(), &dst.into());
+                                            ipv4.set_dst_addr(dst);
+                                            ipv4.fill_checksum();
+                                            let len = unsafe {
+                                                sendto(raw_fd, eth.as_ref().as_ptr() as *mut c_void, eth.as_ref().len() as usize, 0,
+                                                       addr_ptr as *mut sockaddr, addr_buf_sz)
+                                            };
+                                            info!("[{:?}] Forward {}({}) bytes from {} to {}", start_ts.elapsed(), len, eth.as_ref().len(), addr, server_ip);
+                                            add_to_forwarding_map(&mut forwarding_map, eth.as_ref().to_vec(), packet_size, &domain, 1);
+                                        } else {
+                                            info!("Send DNS query and wait for name resolution");
+                                            connection_map.insert(addr, domain.clone());
+                                            add_to_forwarding_map(&mut forwarding_map, eth.as_ref().to_vec(), packet_size, &domain, 0);
+                                            dns_query(&domain, &dns_socket);
+                                        }
                                     },
                                     _ => { error!("Failed to parse/resolve the initial packet"); }
                                 }
